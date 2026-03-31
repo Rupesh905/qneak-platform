@@ -1,0 +1,17 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+
+# LiteLLM + Google Gemini support
+litellm>=1.40.0
+google-generativeai>=0.8.0
+google-ai-generativelanguage>=0.6.0
+
+# PDF processing
+PyMuPDF>=1.23.0
+
+# Optional but recommended for production
+python-jose[cryptography]>=3.3.0  # If you add JWT auth later
+httpx>=0.25.0  # Async HTTP client

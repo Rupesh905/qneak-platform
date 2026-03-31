@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+pydantic
+google-genai
+exa-py
+tinyfish
+langchain-google-genai
+langgraph
+python-docx
