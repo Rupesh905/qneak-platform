@@ -353,6 +353,19 @@ async function syncAuthButtons() {
 
 // Check if user is already logged in on page load
 window.addEventListener('load', async function() {
+  const url = new URL(window.location.href);
+  if (url.searchParams.get('logged_out') === '1') {
+    try {
+      if (supabaseClient) {
+        await supabaseClient.auth.signOut();
+      }
+    } catch (err) {
+      console.error('Marketing logout sync failed:', err);
+    }
+    url.searchParams.delete('logged_out');
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+  }
+
   await syncAuthButtons();
 });
 

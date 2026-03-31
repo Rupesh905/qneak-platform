@@ -529,10 +529,14 @@ async function logout() {
     if (supabaseClient) {
       await supabaseClient.auth.signOut();
     }
-    window.location.href = LANDING_URL;
+    const target = new URL(LANDING_URL, window.location.href);
+    target.searchParams.set('logged_out', '1');
+    window.location.href = target.toString();
   } catch (err) {
     console.error('Logout error:', err);
-    window.location.href = LANDING_URL;
+    const target = new URL(LANDING_URL, window.location.href);
+    target.searchParams.set('logged_out', '1');
+    window.location.href = target.toString();
   }
 }
 </script>
