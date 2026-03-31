@@ -116,10 +116,12 @@
       <p class="font-body text-lg md:text-xl text-on-surface/60 max-w-2xl mx-auto mb-12 leading-relaxed">
         Everything that matters beneath the surface of a company, brought into focus with speed and precision.
       </p>
-      <button onclick="handleLogin()" class="bg-primary-container text-on-primary-fixed font-label uppercase tracking-widest px-10 py-5 text-sm hover:scale-[0.98] transition-transform flex items-center gap-3">
-        Discover how
-        <span class="material-symbols-outlined text-lg">arrow_forward</span>
-      </button>
+      <div class="flex justify-center">
+        <button onclick="handleLogin()" class="bg-primary-container text-on-primary-fixed font-label uppercase tracking-widest px-10 py-5 text-sm hover:scale-[0.98] transition-transform inline-flex items-center gap-3">
+          Discover how
+          <span class="material-symbols-outlined text-lg">arrow_forward</span>
+        </button>
+      </div>
     </div>
   </section>
 
@@ -317,28 +319,46 @@ function buildAppSessionUrl(session) {
   return target.toString();
 }
 
-// Check if user is already logged in on page load
-window.addEventListener('load', async function() {
+async function syncAuthButtons() {
+  const loginBtn = document.getElementById('login-btn');
+  const dashboardBtn = document.getElementById('dashboard-btn');
+
+  if (IS_LOCAL && localStorage.getItem(LOCAL_DEV_SESSION_KEY)) {
+    loginBtn.style.display = 'none';
+    dashboardBtn.style.display = 'flex';
+    return;
+  }
+
+  if (!supabaseClient) {
+    loginBtn.style.display = 'flex';
+    dashboardBtn.style.display = 'none';
+    return;
+  }
+
   try {
-    if (IS_LOCAL && localStorage.getItem(LOCAL_DEV_SESSION_KEY)) {
-      document.getElementById('login-btn').style.display = 'none';
-      document.getElementById('dashboard-btn').style.display = 'flex';
-      return;
-    }
-
-    if (!supabaseClient) {
-      console.error('Supabase failed to load from CDN.');
-      return;
-    }
-
     const { data: { session } } = await supabaseClient.auth.getSession();
     if (session) {
-      document.getElementById('login-btn').style.display = 'none';
-      document.getElementById('dashboard-btn').style.display = 'flex';
+      loginBtn.style.display = 'none';
+      dashboardBtn.style.display = 'flex';
+    } else {
+      loginBtn.style.display = 'flex';
+      dashboardBtn.style.display = 'none';
     }
   } catch (err) {
-    console.error('Auth check failed:', err);
+    console.error('Auth button sync failed:', err);
+    loginBtn.style.display = 'flex';
+    dashboardBtn.style.display = 'none';
   }
+}
+
+// Check if user is already logged in on page load
+window.addEventListener('load', async function() {
+  await syncAuthButtons();
+});
+
+window.addEventListener('focus', syncAuthButtons);
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden) syncAuthButtons();
 });
 
 // Handle Login Click
