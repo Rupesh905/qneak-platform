@@ -424,6 +424,24 @@ const supabaseClient = window.supabase?.createClient
     })
   : null;
 
+function readSessionFromHash() {
+  const rawHash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '';
+  if (!rawHash) return null;
+  const params = new URLSearchParams(rawHash);
+  const accessToken = params.get('access_token');
+  const refreshToken = params.get('refresh_token');
+  if (!accessToken || !refreshToken) return null;
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken
+  };
+}
+
+function clearSessionHash() {
+  const cleanUrl = `${window.location.pathname}${window.location.search}`;
+  window.history.replaceState({}, document.title, cleanUrl);
+}
+
 function showAppForUser(userEmail) {
   const resolvedEmail = userEmail || 'user@qneak.com';
   document.getElementById('userName').textContent = resolvedEmail.split('@')[0];
@@ -452,6 +470,15 @@ window.addEventListener('load', async function() {
       console.error('Supabase failed to load from CDN.');
       document.querySelector('#auth-loading .loading-text').textContent = 'Unable to load authentication.';
       return;
+    }
+
+    const sessionFromHash = readSessionFromHash();
+    if (sessionFromHash) {
+      const { error: setSessionError } = await supabaseClient.auth.setSession(sessionFromHash);
+      clearSessionHash();
+      if (setSessionError) {
+        console.error('Session handoff failed:', setSessionError);
+      }
     }
 
     const { data: { session }, error } = await supabaseClient.auth.getSession();

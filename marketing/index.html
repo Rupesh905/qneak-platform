@@ -305,6 +305,18 @@ const supabaseClient = window.supabase?.createClient
     })
   : null;
 
+function buildAppSessionUrl(session) {
+  const target = new URL(APP_URL, window.location.href);
+  if (session?.access_token && session?.refresh_token) {
+    const hash = new URLSearchParams({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token
+    });
+    target.hash = hash.toString();
+  }
+  return target.toString();
+}
+
 // Check if user is already logged in on page load
 window.addEventListener('load', async function() {
   try {
@@ -368,7 +380,7 @@ async function handleLogin() {
       if (IS_LOCAL) {
         localStorage.setItem(LOCAL_DEV_SESSION_KEY, data.session.user?.email || email);
       }
-      window.location.href = APP_URL;
+      window.location.href = buildAppSessionUrl(data.session);
     }
   } catch (err) {
     if (IS_LOCAL) {
