@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>QNEAK | Private Markets Intelligence</title>
+
+<!-- SUPABASE CLIENT -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;700;800&family=Inter:wght@300;400;500&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "on-primary-container": "#461f00", "primary-fixed": "#ffdbc7",
+          "on-surface-variant": "#d9c2b5", "surface-variant": "#353437",
+          "on-primary-fixed": "#311300", "on-surface": "#e5e1e4",
+          "on-secondary": "#09381f", "on-tertiary": "#00363b",
+          "error-container": "#93000a", "secondary-fixed-dim": "#a2d2af",
+          "on-tertiary-fixed-variant": "#004f55", "on-background": "#e5e1e4",
+          "on-error-container": "#ffdad6", "surface": "#131315",
+          "background": "#131315", "on-primary-fixed-variant": "#733600",
+          "on-secondary-container": "#91c09e", "on-tertiary-container": "#002f33",
+          "tertiary-container": "#269faa", "outline": "#a18d81",
+          "primary-container": "#cd7d45", "surface-container-lowest": "#0e0e10",
+          "on-secondary-fixed": "#00210f", "error": "#ffb4ab",
+          "tertiary": "#6bd6e1", "tertiary-fixed": "#89f3fe",
+          "surface-tint": "#ffb687", "secondary-fixed": "#bdeeca",
+          "tertiary-fixed-dim": "#6bd6e1", "surface-container": "#201f22",
+          "on-secondary-fixed-variant": "#234f34", "surface-container-high": "#2a2a2c",
+          "inverse-surface": "#e5e1e4", "surface-dim": "#131315",
+          "outline-variant": "#53433a", "inverse-on-surface": "#313032",
+          "surface-container-highest": "#353437", "inverse-primary": "#904c18",
+          "on-error": "#690005", "on-tertiary-fixed": "#002023",
+          "on-primary": "#512400", "surface-bright": "#39393b",
+          "primary": "#ffb687", "primary-fixed-dim": "#ffb687",
+          "secondary-container": "#234f34", "secondary": "#a2d2af",
+          "surface-container-low": "#1c1b1d"
+        },
+        fontFamily: {
+          "headline": ["Manrope"],
+          "body": ["Inter"],
+          "label": ["Space Grotesk"]
+        },
+        borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+      },
+    },
+  }
+</script>
+
+<style>
+  body { background-color: #131315; color: #e5e1e4; overflow-x: hidden; scroll-behavior: smooth; }
+  .noise-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; opacity: 0.02; z-index: 9999; background-image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMDAiIGhlaWdodD0iMzAwIj48ZmlsdGVyIGlkPSJnoiPjxmZVR1cmJ1bGVuY2UgdHlwZT0iZnJhY3RhbE5vaXNlIiBiYXNlRnJlcXVlbmN5PSIwLjY1IiBudW1PY3RhdmVzPSIzIiBzdGl0Y2hUaWxlcz0ic3RpdGNoIi8+PC9maWx0ZXI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsdGVyPSJ1cmwoI2cpIiBvcGFjaXR5PSIwLjUiLz48L3N2Zz4=); }
+  .glass-card { background: rgba(28, 27, 29, 0.4); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px) }
+  .gradient-blur-copper { background: radial-gradient(circle at center, rgba(255, 182, 135, 0.08) 0%, transparent 70%) }
+  .gradient-blur-green { background: radial-gradient(circle at center, rgba(162, 210, 175, 0.05) 0%, transparent 70%) }
+  .material-symbols-outlined { font-variation-settings: "FILL" 0, "wght" 200, "GRAD" 0, "opsz" 24 }
+  .nav-link { position: relative; transition: all 0.3s ease; }
+  .nav-link::after { content: ''; position: absolute; bottom: -4px; left: 0; width: 0; height: 1px; background-color: #ffb687; transition: width 0.3s ease; }
+  .nav-link.active { color: #ffb687; }
+  .nav-link.active::after { width: 100%; }
+  #dashboard-btn { display: none; }
+</style>
+</head>
+
+<body class="font-body selection:bg-primary/30">
+<div class="noise-overlay"></div>
+
+<!-- Navigation -->
+<nav class="fixed top-0 w-full z-[100] bg-[#131315]/80 backdrop-blur-xl border-b border-[#ffffff]/10">
+  <div class="flex justify-between items-center px-8 py-5 w-full max-w-[1440px] mx-auto">
+    <div class="flex items-center gap-3">
+      <svg class="h-8 w-auto" viewbox="0 0 120 90" xmlns="http://www.w3.org/2000/svg">
+        <g transform="translate(0, 2)">
+          <path d="M 60 0 L 46 22 L 52 20 L 42 42 L 48 40 L 20 80 L 100 80 L 72 40 L 78 42 L 68 20 L 74 22 Z" fill="none" stroke="#ffb687" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5"></path>
+          <line stroke="#a2d2af" stroke-dasharray="3 2" stroke-width="1.2" x1="60" x2="60" y1="8" y2="80"></line>
+          <path d="M 60 0 L 50 16 L 70 16 Z" fill="#ffb687" opacity="0.1"></path>
+        </g>
+      </svg>
+      <span class="font-headline font-light tracking-[0.3em] text-[#ffb687] text-xl lowercase">qneak</span>
+    </div>
+    <div class="hidden md:flex gap-12">
+      <a class="nav-link font-label text-sm tracking-widest uppercase text-[#e5e1e4]/60 hover:text-[#e5e1e4] transition-colors pb-1 active" href="#intelligence" data-section="intelligence">Intelligence</a>
+      <a class="nav-link font-label text-sm tracking-widest uppercase text-[#e5e1e4]/60 hover:text-[#e5e1e4] transition-colors pb-1" href="#markets" data-section="markets">Markets</a>
+      <a class="nav-link font-label text-sm tracking-widest uppercase text-[#e5e1e4]/60 hover:text-[#e5e1e4] transition-colors pb-1" href="#strategy" data-section="strategy">Strategy</a>
+      <a class="nav-link font-label text-sm tracking-widest uppercase text-[#e5e1e4]/60 hover:text-[#e5e1e4] transition-colors pb-1" href="#process" data-section="process">Process</a>
+    </div>
+    <div class="flex items-center gap-4">
+      <a href="https://cal.com/rupesh05" target="_blank" class="font-label text-sm tracking-widest uppercase text-[#ffb687] hover:bg-[#ffb687]/10 px-4 py-2 transition-all duration-300 rounded-full border border-[#ffb687]/30 h-9 flex items-center justify-center leading-none">Schedule</a>
+      <button id="login-btn" onclick="handleLogin()" class="font-label text-sm tracking-widest uppercase text-[#e5e1e4]/80 hover:text-[#ffb687] hover:border-[#ffb687]/50 px-4 py-2 transition-all duration-300 rounded-full border border-[#ffffff]/20 h-9 flex items-center justify-center leading-none">Login</button>
+      <button id="dashboard-btn" onclick="goToDashboard()" class="font-label text-sm tracking-widest uppercase text-[#ffb687] border border-[#ffb687]/30 px-4 py-2 transition-all duration-300 rounded-full hover:bg-[#ffb687]/10 h-9 flex items-center justify-center leading-none">Open Dashboard</button>
+    </div>
+  </div>
+</nav>
+
+<main class="relative">
+  <!-- Hero Section -->
+  <section id="intelligence" class="relative min-h-screen flex flex-col justify-center items-center px-6 pt-32 pb-20 overflow-hidden">
+    <div class="absolute inset-0 z-0">
+      <div class="absolute top-[-10%] right-[-5%] w-[600px] h-[600px] gradient-blur-copper rounded-full"></div>
+      <div class="absolute bottom-[-10%] left-[-5%] w-[600px] h-[600px] gradient-blur-green rounded-full"></div>
+    </div>
+    <div class="relative z-10 max-w-5xl w-full text-center">
+      <p class="font-label text-xs tracking-[0.4em] uppercase text-primary mb-6 opacity-80">Private Markets Intelligence</p>
+      <p class="font-headline font-extralight italic text-on-surface-variant/40 text-lg mb-8 tracking-widest">"the unmoving centre of infinite vision"</p>
+      <h1 class="font-headline text-5xl md:text-8xl font-light tracking-tight text-on-surface mb-10 leading-[1.1]">
+        A sharper lens on <br/>
+        <span class="italic font-normal text-primary">company research</span>.
+      </h1>
+      <p class="font-body text-lg md:text-xl text-on-surface/60 max-w-2xl mx-auto mb-12 leading-relaxed">
+        Everything that matters beneath the surface of a company, brought into focus with speed and precision.
+      </p>
+      <button onclick="handleLogin()" class="bg-primary-container text-on-primary-fixed font-label uppercase tracking-widest px-10 py-5 text-sm hover:scale-[0.98] transition-transform flex items-center gap-3">
+        Discover how
+        <span class="material-symbols-outlined text-lg">arrow_forward</span>
+      </button>
+    </div>
+  </section>
+
+  <!-- Philosophy Section -->
+  <section id="markets" class="py-32 px-6 relative bg-surface-container-low">
+    <div class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-20 items-center">
+      <div class="relative">
+        <div class="w-full aspect-square flex items-center justify-center">
+          <svg class="opacity-40" fill="none" height="400" viewbox="0 0 400 400" width="400" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="200" cy="200" r="150" stroke="#ffb687" stroke-dasharray="4 4" stroke-width="0.5"></circle>
+            <circle cx="200" cy="200" r="80" stroke="#a2d2af" stroke-width="0.5"></circle>
+            <circle cx="200" cy="200" fill="#ffb687" r="5"></circle>
+            <path d="M200 50V120M200 280V350M50 200H120M280 200H350" stroke="#ffb687" stroke-width="0.5"></path>
+            <circle cx="100" cy="100" fill="#6bd6e1" r="3"></circle>
+            <circle cx="300" cy="300" fill="#6bd6e1" r="3"></circle>
+            <path d="M100 100L200 200L300 300" stroke="#6bd6e1" stroke-width="0.2"></path>
+          </svg>
+          <div class="absolute inset-0 flex items-center justify-center">
+            <span class="font-label text-[10px] tracking-[0.5em] uppercase text-tertiary">Insight Mapping</span>
+          </div>
+        </div>
+      </div>
+      <div class="space-y-10">
+        <h2 class="font-headline text-4xl md:text-5xl font-light text-on-surface leading-tight">
+          Due diligence is deep work interrupted by shallow tasks.
+        </h2>
+        <p class="font-body text-on-surface/50 text-lg leading-relaxed max-w-lg">
+          We prioritize analysis over navigation. Our technology fades into the background, providing a seamless bridge between raw data and actionable intelligence. No dashboards, just clarity.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Method Section -->
+  <section id="strategy" class="py-32 px-6">
+    <div class="max-w-7xl mx-auto">
+      <div class="mb-20">
+        <p class="font-label text-xs tracking-widest uppercase text-secondary mb-4">Process</p>
+        <h2 class="font-headline text-4xl md:text-6xl font-light text-on-surface">The Method: <span class="text-on-surface-variant/40">From name to knowing</span></h2>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-px bg-outline-variant/20">
+        <div class="bg-surface py-16 pr-12 group hover:bg-surface-container-low transition-colors duration-500">
+          <span class="font-headline text-primary text-xl mb-12 block">I.</span>
+          <h3 class="font-headline text-2xl font-light mb-6 text-on-surface">The Naming</h3>
+          <p class="font-body text-on-surface/50 leading-relaxed mb-8">We map the digital and physical presence of an entity, identifying shadow structures and dormant aliases across global jurisdictions.</p>
+          <div class="h-1 w-0 bg-primary group-hover:w-full transition-all duration-700"></div>
+        </div>
+        <div class="bg-surface py-16 px-12 group hover:bg-surface-container-low transition-colors duration-500">
+          <span class="font-headline text-primary text-xl mb-12 block">II.</span>
+          <h3 class="font-headline text-2xl font-light mb-6 text-on-surface">The Assembly</h3>
+          <p class="font-body text-on-surface/50 leading-relaxed mb-8">Structuring ownership hierarchies and capital history into a cohesive timeline. We rebuild the corporate architecture from the ground up.</p>
+          <div class="h-1 w-0 bg-primary group-hover:w-full transition-all duration-700"></div>
+        </div>
+        <div class="bg-surface py-16 pl-12 group hover:bg-surface-container-low transition-colors duration-500">
+          <span class="font-headline text-primary text-xl mb-12 block">III.</span>
+          <h3 class="font-headline text-2xl font-light mb-6 text-on-surface">The Brief</h3>
+          <p class="font-body text-on-surface/50 leading-relaxed mb-8">A structured intelligence dossier delivered via private portal. Executive-level insights designed for immediate strategic decision-making.</p>
+          <div class="h-1 w-0 bg-primary group-hover:w-full transition-all duration-700"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Capabilities Section -->
+  <section id="process" class="py-32 px-6 bg-surface-container-low">
+    <div class="max-w-7xl mx-auto">
+      <div class="mb-20 text-center">
+        <h2 class="font-headline text-4xl font-light">Engineered for Precision</h2>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-6 h-auto md:h-[800px]">
+        <div class="md:col-span-8 bg-surface-container-high p-12 relative overflow-hidden group">
+          <div class="relative z-10 flex flex-col h-full justify-between">
+            <span class="material-symbols-outlined text-primary text-3xl">hub</span>
+            <div>
+              <h3 class="font-headline text-3xl font-light mb-4">Company Mapping</h3>
+              <p class="font-body text-on-surface/50 max-w-md">Uncover beneficial ownership and hidden corporate networks across 40+ high-sensitivity jurisdictions.</p>
+            </div>
+          </div>
+          <div class="absolute right-0 bottom-0 opacity-10 translate-x-1/4 translate-y-1/4 group-hover:scale-110 transition-transform duration-1000">
+            <span class="material-symbols-outlined text-[300px]" style="font-variation-settings: 'wght' 100">language</span>
+          </div>
+        </div>
+        <div class="md:col-span-4 bg-surface-container-highest p-12 relative overflow-hidden">
+          <div class="flex flex-col h-full justify-between">
+            <span class="material-symbols-outlined text-secondary text-3xl">quick_reference_all</span>
+            <div>
+              <h3 class="font-headline text-3xl font-light mb-4">Document Navigation</h3>
+              <p class="font-body text-on-surface/50">Query complex data rooms in plain language. Extract truth from thousands of pages in seconds.</p>
+            </div>
+          </div>
+        </div>
+        <div class="md:col-span-4 bg-surface-container-highest p-12 relative overflow-hidden">
+          <div class="flex flex-col h-full justify-between">
+            <span class="material-symbols-outlined text-tertiary text-3xl">verified_user</span>
+            <div>
+              <h3 class="font-headline text-3xl font-light mb-4">Source Verification</h3>
+              <p class="font-body text-on-surface/50">Every finding is linked to original filings. A pristine chain of evidence for every insight provided.</p>
+            </div>
+          </div>
+        </div>
+        <div class="md:col-span-8 bg-surface-container-high p-12 relative overflow-hidden">
+          <div class="relative z-10 flex flex-col h-full justify-between">
+            <span class="material-symbols-outlined text-primary text-3xl">public</span>
+            <div>
+              <h3 class="font-headline text-3xl font-light mb-4">Select Markets</h3>
+              <p class="font-body text-on-surface/50 max-w-md">Deep focus on specific emerging jurisdictions where public data is often obscured or incomplete.</p>
+            </div>
+          </div>
+          <img alt="World map" class="absolute inset-0 w-full h-full object-cover opacity-5 mix-blend-screen" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBcPPuoW86cjOmfQS5Q3TrCKnM7XM7w9IKrhK1jVBdm5JjukBRT6ts93HwgqloXUbSeqaWX2KuP4TEfu2rOF26PGQ7FI3Bl70djBlEvKL9IriFnjmO0bvg0MjwpQfaprXjaiHEZ5qIGB2gzCbs5NyzF7ELwDELEuEKkCLs7ellFFkvGY9LGNgwnvFWM7bWIcFnxO-VJsvqKNbICngIKDca1LG4FUheug6bHiqkekqJPp4X5txNUe_ZT02I8ziO42lyKahJOlu4zpRHv"/>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Closing Section -->
+  <section class="relative py-40 px-6 text-center overflow-hidden">
+    <div class="absolute inset-0 bg-surface flex items-center justify-center">
+      <div class="w-[800px] h-[800px] bg-primary/5 rounded-full blur-[120px]"></div>
+    </div>
+    <div class="relative z-10 max-w-3xl mx-auto">
+      <p class="font-label text-xs tracking-[0.5em] uppercase text-primary mb-12">Limited release. By design.</p>
+      <h2 class="font-headline text-5xl md:text-7xl font-extralight text-on-surface mb-16 leading-tight">
+        Intelligence for those who <br/> <span class="italic font-normal">know why it matters.</span>
+      </h2>
+      <div class="flex justify-center">
+        <button onclick="handleLogin()" class="group relative overflow-hidden bg-primary-container text-on-primary-fixed font-label uppercase tracking-widest px-16 py-6 text-sm transition-all duration-500 hover:px-20 inline-flex items-center gap-3">
+          <span class="relative z-10">Request Access</span>
+          <div class="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
+        </button>
+      </div>
+      <p class="mt-12 font-body text-on-surface/30 text-sm">Strict confidentiality protocols apply to all inquiries.</p>
+    </div>
+  </section>
+</main>
+
+<!-- Footer -->
+<footer class="w-full border-t border-[#ffffff]/5 mt-20 bg-[#131315]">
+  <div class="flex flex-col justify-between items-center px-12 py-12 w-full gap-8 max-w-[1440px] mx-auto">
+    <div class="font-headline text-[#ffb687] lowercase font-light tracking-[0.2em] text-xl">qneak</div>
+    <div class="flex flex-wrap justify-center gap-8">
+      <a class="font-label text-[10px] uppercase tracking-tighter text-[#e5e1e4]/40 hover:text-[#6bd6e1] transition-colors" href="#">Privacy</a>
+    </div>
+    <div class="font-label text-[10px] uppercase tracking-tighter text-[#e5e1e4]/40 text-center">
+      © 2026 THE DIGITAL CURATOR. PRIVATE INTELLIGENCE ARCHITECTURE.
+    </div>
+  </div>
+</footer>
+
+<!-- SUPABASE AUTH CONFIGURATION - READY TO USE -->
+<script>
+// ==========================================
+// YOUR NEW PROJECT CREDENTIALS (PRE-FILLED)
+// ==========================================
+
+// Project URL (from your new project):
+const SUPABASE_URL = 'https://agjoazrxtxblyvvjlgy.supabase.co';
+const IS_LOCAL = ['localhost', '127.0.0.1', ''].includes(window.location.hostname) || window.location.protocol === 'file:';
+const APP_URL = IS_LOCAL
+  ? '../app/index.html'
+  : 'https://app.qneak.com';
+const LOCAL_DEV_SESSION_KEY = 'qneak_local_session_email';
+
+// Anon/Publishable Key (safe for frontend):
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFnam9henJ4dHhibHl2dmpsamd5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5NjkxNjQsImV4cCI6MjA5MDU0NTE2NH0.OPIydj-PhjBNX-2RSZkhhM3VPSfMRSDCgfFQA84K9uc';
+
+// ==========================================
+// INITIALIZE SUPABASE
+// ==========================================
+const supabaseClient = window.supabase?.createClient
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        autoRefreshToken: true,
+        persistSession: true,
+        detectSessionInUrl: true,
+        ...(IS_LOCAL ? {} : {
+          cookieOptions: {
+            domain: '.qneak.com',
+            secure: true,
+            sameSite: 'lax'
+          }
+        })
+      }
+    })
+  : null;
+
+// Check if user is already logged in on page load
+window.addEventListener('load', async function() {
+  try {
+    if (IS_LOCAL && localStorage.getItem(LOCAL_DEV_SESSION_KEY)) {
+      document.getElementById('login-btn').style.display = 'none';
+      document.getElementById('dashboard-btn').style.display = 'flex';
+      return;
+    }
+
+    if (!supabaseClient) {
+      console.error('Supabase failed to load from CDN.');
+      return;
+    }
+
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (session) {
+      document.getElementById('login-btn').style.display = 'none';
+      document.getElementById('dashboard-btn').style.display = 'flex';
+    }
+  } catch (err) {
+    console.error('Auth check failed:', err);
+  }
+});
+
+// Handle Login Click
+async function handleLogin() {
+  const email = prompt('Email (demo@qneak.com):');
+  if (!email) return;
+  const password = prompt('Password (demo123):');
+  if (!password) return;
+
+  if (!supabaseClient) {
+    if (IS_LOCAL) {
+      localStorage.setItem(LOCAL_DEV_SESSION_KEY, email);
+      window.location.href = APP_URL;
+      return;
+    }
+
+    alert('Supabase failed to load. Check your internet connection and refresh the page.');
+    return;
+  }
+  
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({
+      email: email,
+      password: password
+    });
+    
+    if (error) {
+      if (IS_LOCAL && /load failed/i.test(error.message || '')) {
+        localStorage.setItem(LOCAL_DEV_SESSION_KEY, email);
+        window.location.href = APP_URL;
+        return;
+      }
+
+      alert('Login failed: ' + error.message);
+      return;
+    }
+    
+    if (data.session) {
+      if (IS_LOCAL) {
+        localStorage.setItem(LOCAL_DEV_SESSION_KEY, data.session.user?.email || email);
+      }
+      window.location.href = APP_URL;
+    }
+  } catch (err) {
+    if (IS_LOCAL) {
+      localStorage.setItem(LOCAL_DEV_SESSION_KEY, email);
+      window.location.href = APP_URL;
+      return;
+    }
+
+    alert('Error: ' + err.message);
+  }
+}
+
+// Handle Dashboard Click
+function goToDashboard() {
+  window.location.href = APP_URL;
+}
+
+// Scroll spy functionality
+document.addEventListener('DOMContentLoaded', function() {
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('.nav-link');
+  
+  navLinks.forEach(link => {
+    link.addEventListener('click', function(e) {
+      e.preventDefault();
+      const targetId = this.getAttribute('href').substring(1);
+      const targetSection = document.getElementById(targetId);
+      if (targetSection) {
+        const navHeight = document.querySelector('nav').offsetHeight;
+        const targetPosition = targetSection.offsetTop - navHeight;
+        window.scrollTo({ top: targetPosition, behavior: 'smooth' });
+      }
+    });
+  });
+  
+  function updateActiveNav() {
+    const scrollPosition = window.scrollY + window.innerHeight / 3;
+    const navHeight = document.querySelector('nav').offsetHeight;
+    
+    sections.forEach(section => {
+      const sectionTop = section.offsetTop - navHeight;
+      const sectionHeight = section.offsetHeight;
+      const sectionId = section.getAttribute('id');
+      
+      if (scrollPosition >= sectionTop && scrollPosition < sectionTop + sectionHeight) {
+        navLinks.forEach(link => {
+          link.classList.remove('active');
+          if (link.getAttribute('data-section') === sectionId) {
+            link.classList.add('active');
+          }
+        });
+      }
+    });
+  }
+  
+  let ticking = false;
+  window.addEventListener('scroll', function() {
+    if (!ticking) {
+      window.requestAnimationFrame(function() {
+        updateActiveNav();
+        ticking = false;
+      });
+      ticking = true;
+    }
+  });
+  updateActiveNav();
+});
+</script>
+</body>
+</html>
