@@ -406,6 +406,80 @@ const API_BASE_URL = IS_LOCAL
   ? 'https://qneak-platform-547919179099.europe-west1.run.app'
   : 'https://qneak-platform-547919179099.europe-west1.run.app';
 const LOCAL_DEV_SESSION_KEY = 'qneak_local_session_email';
+const SESSION_STARTED_AT_KEY = 'qneak_session_started_at';
+const SESSION_USER_KEY = 'qneak_session_user';
+const SESSION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+let sessionExpiryTimer = null;
+
+function clearSessionExpiryState() {
+  localStorage.removeItem(SESSION_STARTED_AT_KEY);
+  localStorage.removeItem(SESSION_USER_KEY);
+  if (sessionExpiryTimer) {
+    clearTimeout(sessionExpiryTimer);
+    sessionExpiryTimer = null;
+  }
+}
+
+function getSessionStartInfo(userEmail) {
+  const normalizedEmail = userEmail || 'user@qneak.com';
+  const storedUser = localStorage.getItem(SESSION_USER_KEY) || '';
+  const rawStartedAt = localStorage.getItem(SESSION_STARTED_AT_KEY) || '';
+  const startedAt = Number(rawStartedAt);
+  return {
+    normalizedEmail,
+    storedUser,
+    startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+  };
+}
+
+async function forceSessionLogout(reason = 'logged_out') {
+  clearSessionExpiryState();
+  localStorage.removeItem(LOCAL_DEV_SESSION_KEY);
+  try {
+    if (supabaseClient) {
+      await supabaseClient.auth.signOut();
+    }
+  } catch (err) {
+    console.error('Session timeout logout error:', err);
+  }
+  const target = new URL(LANDING_URL, window.location.href);
+  target.searchParams.set(reason, '1');
+  window.location.href = target.toString();
+}
+
+function scheduleSessionExpiryLogout() {
+  if (sessionExpiryTimer) {
+    clearTimeout(sessionExpiryTimer);
+    sessionExpiryTimer = null;
+  }
+  const startedAt = Number(localStorage.getItem(SESSION_STARTED_AT_KEY) || '0');
+  if (!startedAt) return;
+  const remaining = SESSION_MAX_AGE_MS - (Date.now() - startedAt);
+  if (remaining <= 0) {
+    void forceSessionLogout('session_expired');
+    return;
+  }
+  sessionExpiryTimer = window.setTimeout(() => {
+    void forceSessionLogout('session_expired');
+  }, remaining);
+}
+
+async function allowSession(userEmail) {
+  const info = getSessionStartInfo(userEmail);
+  const now = Date.now();
+  if (!info.startedAt || info.storedUser !== info.normalizedEmail) {
+    localStorage.setItem(SESSION_STARTED_AT_KEY, String(now));
+    localStorage.setItem(SESSION_USER_KEY, info.normalizedEmail);
+    scheduleSessionExpiryLogout();
+    return true;
+  }
+  if (now - info.startedAt >= SESSION_MAX_AGE_MS) {
+    await forceSessionLogout('session_expired');
+    return false;
+  }
+  scheduleSessionExpiryLogout();
+  return true;
+}
 
 const supabaseClient = window.supabase?.createClient
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -463,7 +537,9 @@ window.addEventListener('load', async function() {
 
     if (!supabaseClient) {
       if (localDevEmail) {
-        showAppForUser(localDevEmail);
+        if (await allowSession(localDevEmail)) {
+          showAppForUser(localDevEmail);
+        }
         return;
       }
 
@@ -486,7 +562,9 @@ window.addEventListener('load', async function() {
     if (error) {
       console.error('Session error:', error);
       if (localDevEmail) {
-        showAppForUser(localDevEmail);
+        if (await allowSession(localDevEmail)) {
+          showAppForUser(localDevEmail);
+        }
         return;
       }
       window.location.href = LANDING_URL;
@@ -495,7 +573,9 @@ window.addEventListener('load', async function() {
     
     if (!session) {
       if (localDevEmail) {
-        showAppForUser(localDevEmail);
+        if (await allowSession(localDevEmail)) {
+          showAppForUser(localDevEmail);
+        }
         return;
       }
 
@@ -507,13 +587,18 @@ window.addEventListener('load', async function() {
     
     // SUCCESS: User is logged in
     console.log('User logged in:', session.user.email);
+    if (!(await allowSession(session.user.email))) {
+      return;
+    }
     showAppForUser(session.user.email);
     
   } catch (err) {
     console.error('Auth initialization error:', err);
     const localDevEmail = IS_LOCAL ? localStorage.getItem(LOCAL_DEV_SESSION_KEY) : null;
     if (localDevEmail) {
-      showAppForUser(localDevEmail);
+      if (await allowSession(localDevEmail)) {
+        showAppForUser(localDevEmail);
+      }
       return;
     }
     window.location.href = LANDING_URL;
@@ -525,13 +610,7 @@ window.addEventListener('load', async function() {
 // ==========================================
 async function logout() {
   try {
-    localStorage.removeItem(LOCAL_DEV_SESSION_KEY);
-    if (supabaseClient) {
-      await supabaseClient.auth.signOut();
-    }
-    const target = new URL(LANDING_URL, window.location.href);
-    target.searchParams.set('logged_out', '1');
-    window.location.href = target.toString();
+    await forceSessionLogout('logged_out');
   } catch (err) {
     console.error('Logout error:', err);
     const target = new URL(LANDING_URL, window.location.href);
