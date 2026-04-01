@@ -297,7 +297,7 @@ def gemini_json(prompt: str) -> Any:
         return {}
     try:
         response = genai_client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-3-flash-preview",
             contents=prompt,
         )
         raw = response.text.strip()
@@ -1643,7 +1643,7 @@ RAW TEXT:
 
 def build_react_agent(company_name: str, country_label: str):
     llm_kwargs = {
-        "model": "gemini-2.5-pro",
+        "model": "gemini-3-flash-preview",
         "temperature": 0,
     }
     if USE_VERTEX_AI and GOOGLE_CLOUD_PROJECT:
