@@ -39,6 +39,9 @@ logger = logging.getLogger("pe_research")
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 GOOGLE_API_KEY      = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", os.getenv("GCP_PROJECT", ""))
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "europe-west1")
+USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "true").lower() in {"1", "true", "yes", "on"}
 EXA_API_KEY         = os.getenv("EXA_API_KEY", "")
 TINYFISH_API_KEY    = os.getenv("TINYFISH_API_KEY", "")
 COMPANIES_HOUSE_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
@@ -48,7 +51,18 @@ SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "research-reports
 SUPABASE_JOBS_TABLE = os.getenv("SUPABASE_JOBS_TABLE", "research_jobs")
 
 try:
-    genai_client = google_genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+    if USE_VERTEX_AI and GOOGLE_CLOUD_PROJECT:
+        genai_client = google_genai.Client(
+            vertexai=True,
+            project=GOOGLE_CLOUD_PROJECT,
+            location=GOOGLE_CLOUD_LOCATION,
+        )
+        logger.info("Google GenAI client initialized with Vertex AI auth")
+    elif GOOGLE_API_KEY:
+        genai_client = google_genai.Client(api_key=GOOGLE_API_KEY)
+        logger.info("Google GenAI client initialized with API key auth")
+    else:
+        genai_client = None
 except Exception as exc:
     logger.warning(f"Google GenAI client init failed: {exc}")
     genai_client = None
@@ -279,7 +293,7 @@ class DeepSearchInput(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def gemini_json(prompt: str) -> Any:
     if not genai_client:
-        logger.error("Gemini client unavailable: GOOGLE_API_KEY is missing or invalid")
+        logger.error("Gemini client unavailable: missing Vertex config or GOOGLE_API_KEY")
         return {}
     try:
         response = genai_client.models.generate_content(
@@ -1628,11 +1642,20 @@ RAW TEXT:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_react_agent(company_name: str, country_label: str):
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-pro",
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0,
-    )
+    llm_kwargs = {
+        "model": "gemini-2.5-pro",
+        "temperature": 0,
+    }
+    if USE_VERTEX_AI and GOOGLE_CLOUD_PROJECT:
+        llm_kwargs.update({
+            "vertexai": True,
+            "project": GOOGLE_CLOUD_PROJECT,
+            "location": GOOGLE_CLOUD_LOCATION,
+        })
+    else:
+        llm_kwargs["google_api_key"] = GOOGLE_API_KEY
+
+    llm = ChatGoogleGenerativeAI(**llm_kwargs)
 
     tools = [
         StructuredTool(
