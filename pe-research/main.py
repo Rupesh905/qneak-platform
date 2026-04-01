@@ -47,9 +47,23 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "research-reports")
 SUPABASE_JOBS_TABLE = os.getenv("SUPABASE_JOBS_TABLE", "research_jobs")
 
-genai_client    = google_genai.Client(api_key=GOOGLE_API_KEY)
-exa_client      = Exa(api_key=EXA_API_KEY) if EXA_API_KEY else None
-tinyfish_client = TinyFish(api_key=TINYFISH_API_KEY) if TINYFISH_API_KEY else None
+try:
+    genai_client = google_genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+except Exception as exc:
+    logger.warning(f"Google GenAI client init failed: {exc}")
+    genai_client = None
+
+try:
+    exa_client = Exa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+except Exception as exc:
+    logger.warning(f"Exa client init failed: {exc}")
+    exa_client = None
+
+try:
+    tinyfish_client = TinyFish(api_key=TINYFISH_API_KEY) if TINYFISH_API_KEY else None
+except Exception as exc:
+    logger.warning(f"TinyFish client init failed: {exc}")
+    tinyfish_client = None
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
 TINYFISH_TIMEOUT     = 180
@@ -264,6 +278,9 @@ class DeepSearchInput(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def gemini_json(prompt: str) -> Any:
+    if not genai_client:
+        logger.error("Gemini client unavailable: GOOGLE_API_KEY is missing or invalid")
+        return {}
     try:
         response = genai_client.models.generate_content(
             model="gemini-2.5-pro",
