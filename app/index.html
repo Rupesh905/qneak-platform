@@ -406,29 +406,32 @@ const API_BASE_URL = IS_LOCAL
   ? 'https://qneak-platform-547919179099.europe-west1.run.app'
   : 'https://qneak-platform-547919179099.europe-west1.run.app';
 const LOCAL_DEV_SESSION_KEY = 'qneak_local_session_email';
-const SESSION_STARTED_AT_KEY = 'qneak_session_started_at';
+const SESSION_LAST_ACTIVE_AT_KEY = 'qneak_session_last_active_at';
 const SESSION_USER_KEY = 'qneak_session_user';
-const SESSION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const SESSION_INACTIVITY_MS = 6 * 60 * 60 * 1000;
 let sessionExpiryTimer = null;
+let currentSessionUserEmail = '';
+let sessionActivityListenersBound = false;
 
 function clearSessionExpiryState() {
-  localStorage.removeItem(SESSION_STARTED_AT_KEY);
+  localStorage.removeItem(SESSION_LAST_ACTIVE_AT_KEY);
   localStorage.removeItem(SESSION_USER_KEY);
+  currentSessionUserEmail = '';
   if (sessionExpiryTimer) {
     clearTimeout(sessionExpiryTimer);
     sessionExpiryTimer = null;
   }
 }
 
-function getSessionStartInfo(userEmail) {
+function getSessionActivityInfo(userEmail) {
   const normalizedEmail = userEmail || 'user@qneak.com';
   const storedUser = localStorage.getItem(SESSION_USER_KEY) || '';
-  const rawStartedAt = localStorage.getItem(SESSION_STARTED_AT_KEY) || '';
-  const startedAt = Number(rawStartedAt);
+  const rawLastActiveAt = localStorage.getItem(SESSION_LAST_ACTIVE_AT_KEY) || '';
+  const lastActiveAt = Number(rawLastActiveAt);
   return {
     normalizedEmail,
     storedUser,
-    startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+    lastActiveAt: Number.isFinite(lastActiveAt) ? lastActiveAt : 0,
   };
 }
 
@@ -452,9 +455,9 @@ function scheduleSessionExpiryLogout() {
     clearTimeout(sessionExpiryTimer);
     sessionExpiryTimer = null;
   }
-  const startedAt = Number(localStorage.getItem(SESSION_STARTED_AT_KEY) || '0');
-  if (!startedAt) return;
-  const remaining = SESSION_MAX_AGE_MS - (Date.now() - startedAt);
+  const lastActiveAt = Number(localStorage.getItem(SESSION_LAST_ACTIVE_AT_KEY) || '0');
+  if (!lastActiveAt) return;
+  const remaining = SESSION_INACTIVITY_MS - (Date.now() - lastActiveAt);
   if (remaining <= 0) {
     void forceSessionLogout('session_expired');
     return;
@@ -464,16 +467,42 @@ function scheduleSessionExpiryLogout() {
   }, remaining);
 }
 
+function recordSessionActivity(userEmail = currentSessionUserEmail) {
+  if (!userEmail) return;
+  const normalizedEmail = userEmail || 'user@qneak.com';
+  currentSessionUserEmail = normalizedEmail;
+  localStorage.setItem(SESSION_USER_KEY, normalizedEmail);
+  localStorage.setItem(SESSION_LAST_ACTIVE_AT_KEY, String(Date.now()));
+  scheduleSessionExpiryLogout();
+}
+
+function bindSessionActivityListeners() {
+  if (sessionActivityListenersBound) return;
+  sessionActivityListenersBound = true;
+  const bump = () => {
+    if (document.visibilityState === 'hidden') return;
+    recordSessionActivity();
+  };
+  ['click', 'keydown', 'scroll', 'touchstart'].forEach((eventName) => {
+    window.addEventListener(eventName, bump, { passive: true });
+  });
+  window.addEventListener('focus', bump);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      recordSessionActivity();
+    }
+  });
+}
+
 async function allowSession(userEmail) {
-  const info = getSessionStartInfo(userEmail);
+  const info = getSessionActivityInfo(userEmail);
   const now = Date.now();
-  if (!info.startedAt || info.storedUser !== info.normalizedEmail) {
-    localStorage.setItem(SESSION_STARTED_AT_KEY, String(now));
-    localStorage.setItem(SESSION_USER_KEY, info.normalizedEmail);
-    scheduleSessionExpiryLogout();
+  currentSessionUserEmail = info.normalizedEmail;
+  if (!info.lastActiveAt || info.storedUser !== info.normalizedEmail) {
+    recordSessionActivity(info.normalizedEmail);
     return true;
   }
-  if (now - info.startedAt >= SESSION_MAX_AGE_MS) {
+  if (now - info.lastActiveAt >= SESSION_INACTIVITY_MS) {
     await forceSessionLogout('session_expired');
     return false;
   }
@@ -518,6 +547,9 @@ function clearSessionHash() {
 
 function showAppForUser(userEmail) {
   const resolvedEmail = userEmail || 'user@qneak.com';
+  currentSessionUserEmail = resolvedEmail;
+  bindSessionActivityListeners();
+  recordSessionActivity(resolvedEmail);
   document.getElementById('userName').textContent = resolvedEmail.split('@')[0];
   document.getElementById('userRole').textContent = IS_LOCAL ? 'Local Dev Session' : 'Active Session';
   document.getElementById('userAvatar').textContent = resolvedEmail.substring(0, 2).toUpperCase();
@@ -989,6 +1021,8 @@ async function authFetch(url, opts={}){
   if(r.status === 401){
     // TODO: Redirect to login or refresh token
     console.warn('Unauthorized — session may have expired');
+  }else if(currentSessionUserEmail){
+    recordSessionActivity(currentSessionUserEmail);
   }
   return r;
 }
