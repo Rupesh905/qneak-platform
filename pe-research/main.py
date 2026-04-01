@@ -2826,7 +2826,12 @@ async def api_status():
 
 @app.get("/")
 async def root():
-    return FileResponse("static/index.html")
+    return {
+        "service": "qneak-pe-research",
+        "status": "ok",
+        "version": "8.0.0",
+        "storage_mode": "supabase" if supabase_enabled() else "local",
+    }
 
 
 # ── Security: Global exception handler — never leak internals ────────────────
