@@ -705,6 +705,22 @@ function peRenderJob(id,d){
   el.innerHTML=`<div class="job-top"><div class="job-name">${esc(d.company||'')}</div><div class="job-stage">${esc(d.message||d.status)} <span class="pct">${d.progress||0}%</span></div></div><div class="job-bar"><div class="job-fill" style="width:${d.progress||0}%"></div></div><div class="job-meta"><div class="d"></div>${d.status}</div>`;
 }
 
+function formatReportTimestamp(raw){
+  if(!raw)return '';
+  const dt=new Date(raw);
+  if(Number.isNaN(dt.getTime()))return '';
+  return dt.toLocaleString([], {year:'numeric', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+}
+
+function reportMetaLine(d){
+  const parts=['Completed'];
+  const stamp=formatReportTimestamp(d.created||d.created_at);
+  if(stamp)parts.push(stamp);
+  const steps=parseInt(d.result?.agent_steps);
+  if(!Number.isNaN(steps) && steps>0)parts.push(`${steps} sources`);
+  return parts.join(' · ');
+}
+
 function peAddReport(d){
   const reportId=d.job_id||d.id;
   if(!reportId)return;
@@ -713,12 +729,13 @@ function peAddReport(d){
   const list=document.getElementById('peReports');const el=document.createElement('div');el.className='rpt-item';
   el.id=`pr-${reportId}`;
   el.dataset.companyName=(d.company||'').toLowerCase();
+  el.dataset.createdAt=d.created||d.created_at||'';
   const dlBtn=document.createElement('div');
   dlBtn.className='rpt-dl';
   dlBtn.innerHTML='<span class="material-symbols-outlined" style="font-size:16px">download</span>';
   dlBtn.addEventListener('click',(e)=>{e.stopPropagation();peDownload(reportId, d.company)});
   el.addEventListener('click',()=>peDownload(reportId, d.company));
-  el.innerHTML=`<div class="rpt-icon"><span class="material-symbols-outlined">description</span></div><div class="rpt-info"><div class="rpt-name">${esc(d.company||'')}</div><div class="rpt-meta">Completed · ${parseInt(d.result?.agent_steps)||0} sources</div></div>`;
+  el.innerHTML=`<div class="rpt-icon"><span class="material-symbols-outlined">description</span></div><div class="rpt-info"><div class="rpt-name">${esc(d.company||'')}</div><div class="rpt-meta">${esc(reportMetaLine(d))}</div></div>`;
   el.appendChild(dlBtn);
   list.prepend(el);
   return el;
