@@ -2014,7 +2014,14 @@ class ReportGenerator:
             f.write(script)
 
         import subprocess
-        result = subprocess.run(["node", script_path], capture_output=True, text=True, timeout=60)
+        try:
+            result = subprocess.run(["node", script_path], capture_output=True, text=True, timeout=60)
+        except FileNotFoundError:
+            logger.error("Report gen error: node is not installed in the runtime")
+            json_path = output_path.replace(".docx", ".json")
+            with open(json_path, "w") as f:
+                json.dump(data, f, indent=2)
+            return json_path
 
         if result.returncode != 0:
             logger.error(f"Report gen error: {result.stderr}")
