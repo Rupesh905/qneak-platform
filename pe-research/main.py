@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Any
 from google import genai as google_genai
 from exa_py import Exa
 from tinyfish import TinyFish, BrowserProfile, ProxyConfig, ProxyCountryCode, CompleteEvent, RunStatus
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -115,8 +115,50 @@ def supabase_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     return headers
 
 
-def serialize_job(job: Dict[str, Any]) -> Dict[str, Any]:
+def job_owner_id(job: Dict[str, Any]) -> str:
+    if job.get("owner_user_id"):
+        return str(job.get("owner_user_id"))
     result = job.get("result") or {}
+    return str(result.get("_owner_user_id") or "")
+
+
+def owner_result_meta(job: Dict[str, Any]) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    owner_user_id = job.get("owner_user_id")
+    owner_email = job.get("owner_email")
+    if owner_user_id:
+        meta["_owner_user_id"] = owner_user_id
+    if owner_email:
+        meta["_owner_email"] = owner_email
+    return meta
+
+
+def with_owner_meta(result: Optional[Dict[str, Any]], job: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(result or {})
+    merged.update(owner_result_meta(job))
+    return merged
+
+
+def public_result(result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cleaned = dict(result or {})
+    cleaned.pop("_owner_user_id", None)
+    cleaned.pop("_owner_email", None)
+    return cleaned
+
+
+def public_job(job: Dict[str, Any], include_result: bool = True) -> Dict[str, Any]:
+    payload = dict(job)
+    payload.pop("owner_user_id", None)
+    payload.pop("owner_email", None)
+    if include_result:
+        payload["result"] = public_result(payload.get("result"))
+    else:
+        payload.pop("result", None)
+    return payload
+
+
+def serialize_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    result = with_owner_meta(job.get("result"), job)
     return {
         "id": job["job_id"],
         "company_name": job.get("company"),
@@ -145,6 +187,8 @@ def hydrate_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "country_code": row.get("country_code"),
         "website_url": row.get("website_url"),
         "created": row.get("created_at"),
+        "owner_user_id": result.get("_owner_user_id"),
+        "owner_email": result.get("_owner_email"),
     }
 
 
@@ -237,6 +281,44 @@ def download_file_from_supabase(object_name: str) -> Optional[bytes]:
     except Exception as exc:
         logger.warning(f"Supabase download failed for {object_name}: {exc}")
         return None
+
+
+def verify_supabase_token(token: str) -> Dict[str, Any]:
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        raise HTTPException(503, "Authentication not configured")
+    try:
+        response = req_lib.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.warning(f"Supabase auth verify failed: {exc}")
+        raise HTTPException(503, "Authentication service unavailable")
+    if response.status_code != 200:
+        raise HTTPException(401, "Unauthorized")
+    user = response.json() if response.content else {}
+    if not user.get("id"):
+        raise HTTPException(401, "Unauthorized")
+    return user
+
+
+def require_authenticated_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "Unauthorized")
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(401, "Unauthorized")
+    return verify_supabase_token(token)
+
+
+def ensure_job_access(job: Dict[str, Any], user: Dict[str, Any]) -> None:
+    owner_id = job_owner_id(job)
+    if owner_id and owner_id != user.get("id"):
+        raise HTTPException(404, "Job not found")
 
 
 def report_download_meta(report_ref: str, company_name: str) -> Dict[str, str]:
@@ -2663,13 +2745,13 @@ class ResearchOrchestrator:
                 "status":   "complete",
                 "progress": 100,
                 "message":  "Research complete",
-                "result": {
+                "result": with_owner_meta({
                     "synthesis":    synthesis,
                     "report_path":  generated_path,
                     "report_storage_path": storage_path,
                     "agent_steps":  steps_done,
                     "jurisdiction": jur,
-                },
+                }, jobs[job_id]),
             })
             persist_job(jobs[job_id])
 
@@ -2686,7 +2768,7 @@ class ResearchOrchestrator:
 # ── API Routes ────────────────────────────────────────────────────────────────
 
 @app.post("/api/discover")
-async def discover_companies(req: CompanyDiscoveryRequest):
+async def discover_companies(req: CompanyDiscoveryRequest, user: Dict[str, Any] = Depends(require_authenticated_user)):
     """
     STEP 1: Quick search to find matching companies.
     Returns a list of candidates with name, website, description, country.
@@ -2781,19 +2863,21 @@ async def discover_companies(req: CompanyDiscoveryRequest):
 
 
 @app.post("/api/research")
-async def start_research(req: ResearchRequest, background_tasks: BackgroundTasks):
+async def start_research(req: ResearchRequest, background_tasks: BackgroundTasks, user: Dict[str, Any] = Depends(require_authenticated_user)):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
         "job_id":       job_id,
         "status":       "queued",
         "progress":     0,
         "message":      "Queued",
-        "result":       None,
+        "result":       with_owner_meta({}, {"owner_user_id": user.get("id"), "owner_email": user.get("email")}),
         "error":        None,
         "company":      req.company_name,
         "country_code": req.country_code,
         "website_url":  req.website_url,
         "created":      datetime.now(timezone.utc).isoformat(),
+        "owner_user_id": user.get("id"),
+        "owner_email":  user.get("email"),
     }
     persist_job(jobs[job_id])
     background_tasks.add_task(
@@ -2803,20 +2887,23 @@ async def start_research(req: ResearchRequest, background_tasks: BackgroundTasks
 
 
 @app.get("/api/research/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, user: Dict[str, Any] = Depends(require_authenticated_user)):
     if job_id in jobs:
-        return jobs[job_id]
+        ensure_job_access(jobs[job_id], user)
+        return public_job(jobs[job_id], include_result=True)
     job = fetch_job_from_supabase(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    return job
+    ensure_job_access(job, user)
+    return public_job(job, include_result=True)
 
 
 @app.get("/api/research/{job_id}/download")
-async def download_report(job_id: str):
+async def download_report(job_id: str, user: Dict[str, Any] = Depends(require_authenticated_user)):
     job = jobs.get(job_id) or fetch_job_from_supabase(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    ensure_job_access(job, user)
     if job["status"] != "complete":
         raise HTTPException(400, "Report not ready yet")
     result = job.get("result") or {}
@@ -2852,11 +2939,13 @@ async def download_report(job_id: str):
 
 
 @app.get("/api/jobs")
-async def list_jobs():
+async def list_jobs(user: Dict[str, Any] = Depends(require_authenticated_user)):
     remote_jobs = list_jobs_from_supabase()
     if remote_jobs is not None:
-        return [{k: v for k, v in j.items() if k != "result"} for j in remote_jobs]
-    return [{k: v for k, v in j.items() if k != "result"} for j in jobs.values()]
+        visible_jobs = [j for j in remote_jobs if not job_owner_id(j) or job_owner_id(j) == user.get("id")]
+        return [public_job(j, include_result=False) for j in visible_jobs]
+    visible_jobs = [j for j in jobs.values() if not job_owner_id(j) or job_owner_id(j) == user.get("id")]
+    return [public_job(j, include_result=False) for j in visible_jobs]
 
 
 @app.get("/api/status")

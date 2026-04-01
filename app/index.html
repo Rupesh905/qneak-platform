@@ -756,14 +756,22 @@ function filterReports(searchTerm){
 
 async function peDownload(id,name){
   try{
+    const fallbackBase=`PE_Research_${sanitizeInput(name,100).replace(/[^a-zA-Z0-9_\- ]/g,'')}`;
+    const r=await authFetch(`${PE_API}/api/research/${encodeURIComponent(id)}/download`);
+    if(!r.ok)return;
+    const b=await r.blob();
+    const u=URL.createObjectURL(b);
     const a=document.createElement('a');
-    a.href=`${PE_API}/api/research/${encodeURIComponent(id)}/download`;
+    a.href=u;
     a.rel='noopener';
     a.style.display='none';
-    a.download=`PE_Research_${sanitizeInput(name,100).replace(/[^a-zA-Z0-9_\- ]/g,'')}`;
+    a.download=parseDownloadFilename(r.headers.get('Content-Disposition'), fallbackBase);
     document.body.appendChild(a);
     a.click();
-    setTimeout(()=>a.remove(),1000);
+    setTimeout(()=>{
+      URL.revokeObjectURL(u);
+      a.remove();
+    },60000);
   }catch{}
 }
 
@@ -1018,25 +1026,39 @@ function escJs(s){
   return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/</g,'\\x3C');
 }
 
-// SECURITY: Auth token management — integrate with Clerk
-function getAuthHeaders(){
+// SECURITY: Auth token management — use current Supabase session
+async function getAuthHeaders(){
   const headers={'Content-Type':'application/json'};
-  // TODO: Replace with Clerk session token
-  // const token = await window.Clerk?.session?.getToken();
-  // if(token) headers['Authorization'] = `Bearer ${token}`;
+  if(supabaseClient){
+    try{
+      const { data:{ session } } = await supabaseClient.auth.getSession();
+      const token = session?.access_token;
+      if(token) headers['Authorization'] = `Bearer ${token}`;
+    }catch(err){
+      console.error('Auth header error:', err);
+    }
+  }
   return headers;
+}
+
+function parseDownloadFilename(headerValue, fallbackName){
+  if(!headerValue) return fallbackName;
+  const utfMatch = headerValue.match(/filename\*=UTF-8''([^;]+)/i);
+  if(utfMatch && utfMatch[1]) return decodeURIComponent(utfMatch[1]);
+  const basicMatch = headerValue.match(/filename="?([^";]+)"?/i);
+  if(basicMatch && basicMatch[1]) return basicMatch[1];
+  return fallbackName;
 }
 
 // SECURITY: Authenticated fetch wrapper
 async function authFetch(url, opts={}){
-  const headers = getAuthHeaders();
+  const headers = await getAuthHeaders();
   if(opts.headers) Object.assign(headers, opts.headers);
   // Don't override Content-Type for FormData
   if(opts.body instanceof FormData) delete headers['Content-Type'];
   opts.headers = headers;
   const r = await fetch(url, opts);
   if(r.status === 401){
-    // TODO: Redirect to login or refresh token
     console.warn('Unauthorized — session may have expired');
   }else if(currentSessionUserEmail){
     recordSessionActivity(currentSessionUserEmail);
