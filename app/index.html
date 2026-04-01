@@ -552,6 +552,7 @@ function switchView(v){
 
 /* ── PE Research Logic ──────────────── */
 const PE_API=API_BASE_URL;
+const PE_COMPLETE_STATUSES = new Set(['complete','completed']);
 let peSel=null,pePollers={};
 
 async function peStatus(){
@@ -583,7 +584,7 @@ async function peStart(){
 
 function pePoll(id,name){
   peRenderJob(id,{status:'queued',progress:0,message:'Queued...',company:name});
-  const fn=async()=>{try{const r=await authFetch(`${PE_API}/api/research/${encodeURIComponent(id)}`);const d=await r.json();peRenderJob(id,d);if(d.status==='complete'||d.status==='failed'){clearInterval(pePollers[id]);delete pePollers[id];if(d.status==='complete')peAddReport(d);peLoadJobs()}}catch{}};
+  const fn=async()=>{try{const r=await authFetch(`${PE_API}/api/research/${encodeURIComponent(id)}`);const d=await r.json();peRenderJob(id,d);if(PE_COMPLETE_STATUSES.has(d.status)||d.status==='failed'){clearInterval(pePollers[id]);delete pePollers[id];if(PE_COMPLETE_STATUSES.has(d.status))peAddReport(d);peLoadJobs()}}catch{}};
   fn();pePollers[id]=setInterval(fn,4000);
 }
 
@@ -594,16 +595,22 @@ function peRenderJob(id,d){
 }
 
 function peAddReport(d){
+  const reportId=d.job_id||d.id;
+  if(!reportId)return;
+  const existing=document.getElementById(`pr-${reportId}`);
+  if(existing)return existing;
   const list=document.getElementById('peReports');const el=document.createElement('div');el.className='rpt-item';
+  el.id=`pr-${reportId}`;
   el.dataset.companyName=(d.company||'').toLowerCase();
-  // SECURITY: Use data attributes + delegated event instead of inline onclick with string interpolation
   const dlBtn=document.createElement('div');
   dlBtn.className='rpt-dl';
   dlBtn.innerHTML='<span class="material-symbols-outlined" style="font-size:16px">download</span>';
-  dlBtn.addEventListener('click',(e)=>{e.stopPropagation();peDownload(d.job_id, d.company)});
+  dlBtn.addEventListener('click',(e)=>{e.stopPropagation();peDownload(reportId, d.company)});
+  el.addEventListener('click',()=>peDownload(reportId, d.company));
   el.innerHTML=`<div class="rpt-icon"><span class="material-symbols-outlined">description</span></div><div class="rpt-info"><div class="rpt-name">${esc(d.company||'')}</div><div class="rpt-meta">Completed · ${parseInt(d.result?.agent_steps)||0} sources</div></div>`;
   el.appendChild(dlBtn);
   list.prepend(el);
+  return el;
 }
 
 function filterReports(searchTerm){
@@ -619,11 +626,31 @@ function filterReports(searchTerm){
   });
 }
 
-async function peDownload(id,name){try{const r=await authFetch(`${PE_API}/api/research/${encodeURIComponent(id)}/download`);if(!r.ok)return;const b=await r.blob();const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download=`PE_Research_${sanitizeInput(name,100).replace(/[^a-zA-Z0-9_\- ]/g,'')}.docx`;a.click();URL.revokeObjectURL(u)}catch{}}
+async function peDownload(id,name){
+  try{
+    const a=document.createElement('a');
+    a.href=`${PE_API}/api/research/${encodeURIComponent(id)}/download`;
+    a.rel='noopener';
+    a.style.display='none';
+    a.download=`PE_Research_${sanitizeInput(name,100).replace(/[^a-zA-Z0-9_\- ]/g,'')}`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>a.remove(),1000);
+  }catch{}
+}
 
 async function peLoadJobs(){
   try{const r=await authFetch(`${PE_API}/api/jobs`);const jobs=await r.json();let a=0,c=0;
-  jobs.forEach(j=>{if(j.status==='running'||j.status==='queued'){a++;if(!pePollers[j.job_id])pePoll(j.job_id,j.company)}if(j.status==='complete')c++});
+  jobs.forEach(j=>{
+    if(j.status==='running'||j.status==='queued'){
+      a++;
+      if(!pePollers[j.job_id])pePoll(j.job_id,j.company);
+    }
+    if(PE_COMPLETE_STATUSES.has(j.status)){
+      c++;
+      peAddReport(j);
+    }
+  });
   document.getElementById('peActive').textContent=a;document.getElementById('peCompleted').textContent=c}catch{}
 }
 

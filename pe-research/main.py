@@ -239,6 +239,20 @@ def download_file_from_supabase(object_name: str) -> Optional[bytes]:
         return None
 
 
+def report_download_meta(report_ref: str, company_name: str) -> Dict[str, str]:
+    safe_company = re.sub(r'[^a-zA-Z0-9_\- ]', '', company_name or 'Report')[:80]
+    ext = os.path.splitext(report_ref or '')[1].lower()
+    if ext == '.json':
+        return {
+            'media_type': 'application/json',
+            'filename': f'PE_Research_{safe_company}.json',
+        }
+    return {
+        'media_type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'filename': f'PE_Research_{safe_company}.docx',
+    }
+
+
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 class ResearchRequest(BaseModel):
     company_name: str
@@ -2636,14 +2650,14 @@ class ResearchOrchestrator:
             ts       = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             out_path = os.path.join("reports", f"{safe}_{ts}.docx")
 
-            await loop.run_in_executor(
+            generated_path = await loop.run_in_executor(
                 None, self.reporter.generate, synthesis, company_name, out_path
             )
 
             storage_path = None
             if supabase_enabled():
-                storage_name = f"{job_id}/{os.path.basename(out_path)}"
-                storage_path = await loop.run_in_executor(None, upload_file_to_supabase, out_path, storage_name)
+                storage_name = f"{job_id}/{os.path.basename(generated_path)}"
+                storage_path = await loop.run_in_executor(None, upload_file_to_supabase, generated_path, storage_name)
 
             jobs[job_id].update({
                 "status":   "complete",
@@ -2651,7 +2665,7 @@ class ResearchOrchestrator:
                 "message":  "Research complete",
                 "result": {
                     "synthesis":    synthesis,
-                    "report_path":  out_path,
+                    "report_path":  generated_path,
                     "report_storage_path": storage_path,
                     "agent_steps":  steps_done,
                     "jurisdiction": jur,
@@ -2807,17 +2821,16 @@ async def download_report(job_id: str):
         raise HTTPException(400, "Report not ready yet")
     result = job.get("result") or {}
     path = result.get("report_path")
-    # Security: validate path stays inside reports directory
-    safe_company = re.sub(r'[^a-zA-Z0-9_\- ]', '', job.get('company', 'Report'))[:80]
     storage_path = result.get("report_storage_path")
+    download_meta = report_download_meta(storage_path or path or "", job.get("company", "Report"))
     if storage_path:
         from fastapi.responses import Response
         payload = download_file_from_supabase(storage_path)
         if payload:
             return Response(
                 content=payload,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={"Content-Disposition": f'attachment; filename="PE_Research_{safe_company}.docx"'},
+                media_type=download_meta["media_type"],
+                headers={"Content-Disposition": f'attachment; filename="{download_meta["filename"]}"'},
             )
 
     if not path:
@@ -2828,12 +2841,13 @@ async def download_report(job_id: str):
     if not os.path.exists(path):
         json_path = path.replace(".docx", ".json")
         if os.path.exists(json_path):
-            return FileResponse(json_path, filename=f"PE_Research_{safe_company}.json")
+            json_meta = report_download_meta(json_path, job.get("company", "Report"))
+            return FileResponse(json_path, media_type=json_meta["media_type"], filename=json_meta["filename"])
         raise HTTPException(404, "Report file missing")
     return FileResponse(
         path,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=f"PE_Research_{safe_company}.docx",
+        media_type=download_meta["media_type"],
+        filename=download_meta["filename"],
     )
 
 
