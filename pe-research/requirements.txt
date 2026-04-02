@@ -3,9 +3,12 @@ uvicorn[standard]
 python-dotenv
 requests
 pydantic
+python-multipart
 google-genai
 exa-py
 tinyfish
 langchain-google-genai
 langgraph
 python-docx
+PyMuPDF
+pypdf

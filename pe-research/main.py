@@ -11,15 +11,17 @@ import asyncio
 import uuid
 import re
 import mimetypes
+import tempfile
 import requests as req_lib
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 from google import genai as google_genai
 from exa_py import Exa
 from tinyfish import TinyFish, BrowserProfile, ProxyConfig, ProxyCountryCode, CompleteEvent, RunStatus
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, UploadFile, File
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -85,6 +87,10 @@ MAX_STREAM_EVENTS    = 150
 MAX_STEPS_PER_EXTR   = 600
 MAX_AGENT_ITERATIONS = 60  # Increased: 14 phases with multiple searches each
 STALE_JOB_MINUTES    = int(os.getenv("STALE_JOB_MINUTES", "90"))
+DOCUMENT_AI_BUCKET   = os.getenv("SUPABASE_DOCUMENTS_BUCKET", SUPABASE_STORAGE_BUCKET)
+DOCUMENT_AI_PREFIX   = os.getenv("SUPABASE_DOCUMENTS_PREFIX", "document-ai")
+DOCUMENT_AI_MODEL    = os.getenv("DOCUMENT_AI_MODEL", "gemini-3-flash-preview")
+MAX_DOCUMENT_UPLOAD_SIZE = 50 * 1024 * 1024
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(title="PE Research Engine", version="8.0.0", docs_url=None, redoc_url=None)
@@ -98,8 +104,17 @@ app.add_middleware(
 
 os.makedirs("reports", exist_ok=True)
 os.makedirs("static",  exist_ok=True)
+LOCAL_DOCUMENT_ROOT = Path("document_ai_data")
+LOCAL_DOCUMENT_ROOT.mkdir(exist_ok=True)
+LOCAL_DOCUMENTS_DIR = LOCAL_DOCUMENT_ROOT / "docs"
+LOCAL_DOCUMENT_TREES_DIR = LOCAL_DOCUMENT_ROOT / "trees"
+LOCAL_DOCUMENT_METADATA_DIR = LOCAL_DOCUMENT_ROOT / "metadata"
+for _dir in (LOCAL_DOCUMENTS_DIR, LOCAL_DOCUMENT_TREES_DIR, LOCAL_DOCUMENT_METADATA_DIR):
+    _dir.mkdir(parents=True, exist_ok=True)
 
 jobs: Dict[str, Dict] = {}
+document_jobs: Dict[str, Dict[str, Any]] = {}
+document_page_cache: Dict[str, Dict[int, str]] = {}
 
 
 def utc_now_iso() -> str:
@@ -289,14 +304,15 @@ def list_jobs_from_supabase() -> Optional[List[Dict[str, Any]]]:
         return None
 
 
-def upload_file_to_supabase(local_path: str, object_name: str) -> Optional[str]:
+def upload_file_to_supabase(local_path: str, object_name: str, bucket_name: Optional[str] = None) -> Optional[str]:
     if not supabase_enabled():
         return None
     try:
+        bucket = bucket_name or SUPABASE_STORAGE_BUCKET
         content_type = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
         with open(local_path, "rb") as handle:
             response = req_lib.post(
-                f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{object_name}",
+                f"{SUPABASE_URL}/storage/v1/object/{bucket}/{object_name}",
                 headers=supabase_headers({
                     "Content-Type": content_type,
                     "x-upsert": "true",
@@ -311,12 +327,34 @@ def upload_file_to_supabase(local_path: str, object_name: str) -> Optional[str]:
         return None
 
 
-def download_file_from_supabase(object_name: str) -> Optional[bytes]:
+def upload_bytes_to_supabase(data: bytes, object_name: str, content_type: str = "application/octet-stream", bucket_name: Optional[str] = None) -> Optional[str]:
+    if not supabase_enabled():
+        return None
+    try:
+        bucket = bucket_name or SUPABASE_STORAGE_BUCKET
+        response = req_lib.post(
+            f"{SUPABASE_URL}/storage/v1/object/{bucket}/{object_name}",
+            headers=supabase_headers({
+                "Content-Type": content_type,
+                "x-upsert": "true",
+            }),
+            data=data,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return object_name
+    except Exception as exc:
+        logger.warning(f"Supabase byte upload failed for {object_name}: {exc}")
+        return None
+
+
+def download_file_from_supabase(object_name: str, bucket_name: Optional[str] = None) -> Optional[bytes]:
     if not (supabase_enabled() and object_name):
         return None
     try:
+        bucket = bucket_name or SUPABASE_STORAGE_BUCKET
         response = req_lib.get(
-            f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{object_name}",
+            f"{SUPABASE_URL}/storage/v1/object/{bucket}/{object_name}",
             headers=supabase_headers(),
             timeout=60,
         )
@@ -325,6 +363,30 @@ def download_file_from_supabase(object_name: str) -> Optional[bytes]:
     except Exception as exc:
         logger.warning(f"Supabase download failed for {object_name}: {exc}")
         return None
+
+
+def list_supabase_storage_objects(prefix: str, bucket_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    if not supabase_enabled():
+        return []
+    try:
+        bucket = bucket_name or SUPABASE_STORAGE_BUCKET
+        response = req_lib.post(
+            f"{SUPABASE_URL}/storage/v1/object/list/{bucket}",
+            headers=supabase_headers({"Content-Type": "application/json"}),
+            json={
+                "prefix": prefix,
+                "limit": 1000,
+                "offset": 0,
+                "sortBy": {"column": "name", "order": "asc"},
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, list) else []
+    except Exception as exc:
+        logger.warning(f"Supabase list failed for {prefix}: {exc}")
+        return []
 
 
 def verify_supabase_token(token: str) -> Dict[str, Any]:
@@ -428,6 +490,326 @@ class DeepSearchInput(BaseModel):
     query:       str = Field(description="Natural language search query")
     search_type: str = Field(default="general", description="Type: funding/company/people/news/general")
     domain:      str = Field(default="", description="Limit to specific domain e.g. techcrunch.com")
+
+
+class DocumentLoadRequest(BaseModel):
+    name: str
+
+
+class DocumentAnalyzeRequest(BaseModel):
+    doc_name: str = Field(...)
+    node: Dict[str, Any] = Field(...)
+
+
+class DocumentSearchRequest(BaseModel):
+    query: str = Field(...)
+    doc_name: Optional[str] = None
+    tree: List[Any] = Field(default_factory=list)
+
+
+class DocumentGapsRequest(BaseModel):
+    doc_name: str
+    checklist: Optional[List[str]] = None
+
+
+DEFAULT_DOCUMENT_CHECKLIST = [
+    "Corporate governance and board structure",
+    "Financial statements and audit reports",
+    "Outstanding debt and liabilities",
+    "Pending or threatened litigation",
+    "Regulatory compliance and licenses",
+    "Intellectual property and patents",
+    "Employment agreements and key personnel",
+    "Material contracts and customer agreements",
+    "Change of control provisions",
+    "Environmental liabilities",
+    "Tax compliance and outstanding obligations",
+    "Insurance coverage",
+    "Related party transactions",
+    "Data privacy and cybersecurity",
+    "Real estate and leases",
+]
+
+
+def sanitize_document_name(filename: str) -> str:
+    raw_name = os.path.basename(filename or "upload.pdf")
+    stem = os.path.splitext(raw_name)[0]
+    safe = re.sub(r"[^a-zA-Z0-9_\-. ]", "", stem).strip()[:100]
+    return safe or "upload"
+
+
+def document_user_prefix(user_id: str) -> str:
+    return f"{DOCUMENT_AI_PREFIX}/{user_id}"
+
+
+def document_source_path(user_id: str, doc_name: str) -> str:
+    return f"{document_user_prefix(user_id)}/docs/{doc_name}.pdf"
+
+
+def document_tree_path(user_id: str, doc_name: str) -> str:
+    return f"{document_user_prefix(user_id)}/trees/{doc_name}_structure.json"
+
+
+def document_metadata_path(user_id: str, doc_name: str) -> str:
+    return f"{document_user_prefix(user_id)}/metadata/{doc_name}.json"
+
+
+def document_local_file(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def document_cache_key(user_id: str, doc_name: str) -> str:
+    return f"{user_id}:{doc_name}"
+
+
+def clear_document_cache(user_id: str, doc_name: str) -> None:
+    document_page_cache.pop(document_cache_key(user_id, doc_name), None)
+
+
+def save_document_blob(user_id: str, doc_name: str, data: bytes) -> str:
+    object_name = document_source_path(user_id, doc_name)
+    if supabase_enabled():
+        uploaded = upload_bytes_to_supabase(data, object_name, content_type="application/pdf", bucket_name=DOCUMENT_AI_BUCKET)
+        if not uploaded:
+            raise HTTPException(503, "Document storage unavailable")
+    local_path = document_local_file(LOCAL_DOCUMENTS_DIR / user_id / f"{doc_name}.pdf")
+    local_path.write_bytes(data)
+    return object_name
+
+
+def save_document_tree(user_id: str, doc_name: str, tree: List[Dict[str, Any]]) -> str:
+    object_name = document_tree_path(user_id, doc_name)
+    payload = json.dumps(tree, ensure_ascii=False, indent=2).encode("utf-8")
+    if supabase_enabled():
+        uploaded = upload_bytes_to_supabase(payload, object_name, content_type="application/json", bucket_name=DOCUMENT_AI_BUCKET)
+        if not uploaded:
+            raise HTTPException(503, "Document storage unavailable")
+    local_path = document_local_file(LOCAL_DOCUMENT_TREES_DIR / user_id / f"{doc_name}_structure.json")
+    local_path.write_bytes(payload)
+    return object_name
+
+
+def save_document_metadata(user_id: str, doc_name: str, metadata: Dict[str, Any]) -> str:
+    object_name = document_metadata_path(user_id, doc_name)
+    payload = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
+    if supabase_enabled():
+        uploaded = upload_bytes_to_supabase(payload, object_name, content_type="application/json", bucket_name=DOCUMENT_AI_BUCKET)
+        if not uploaded:
+            raise HTTPException(503, "Document storage unavailable")
+    local_path = document_local_file(LOCAL_DOCUMENT_METADATA_DIR / user_id / f"{doc_name}.json")
+    local_path.write_bytes(payload)
+    return object_name
+
+
+def load_document_metadata(user_id: str, doc_name: str) -> Optional[Dict[str, Any]]:
+    object_name = document_metadata_path(user_id, doc_name)
+    payload = download_file_from_supabase(object_name, bucket_name=DOCUMENT_AI_BUCKET) if supabase_enabled() else None
+    if payload:
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+    local_path = LOCAL_DOCUMENT_METADATA_DIR / user_id / f"{doc_name}.json"
+    if local_path.exists():
+        try:
+            return json.loads(local_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+def list_document_metadata_for_user(user_id: str) -> List[Dict[str, Any]]:
+    docs: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    if supabase_enabled():
+        prefix = f"{document_user_prefix(user_id)}/metadata"
+        for item in list_supabase_storage_objects(prefix, bucket_name=DOCUMENT_AI_BUCKET):
+            name = str(item.get("name") or "")
+            if not name.endswith(".json"):
+                continue
+            payload = download_file_from_supabase(f"{prefix}/{name}", bucket_name=DOCUMENT_AI_BUCKET)
+            if not payload:
+                continue
+            try:
+                meta = json.loads(payload.decode("utf-8"))
+                doc_name = str(meta.get("name") or name[:-5])
+                if doc_name in seen:
+                    continue
+                seen.add(doc_name)
+                docs.append(meta)
+            except Exception:
+                continue
+    local_dir = LOCAL_DOCUMENT_METADATA_DIR / user_id
+    if local_dir.exists():
+        for path in sorted(local_dir.glob("*.json")):
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+                doc_name = str(meta.get("name") or path.stem)
+                if doc_name in seen:
+                    continue
+                seen.add(doc_name)
+                docs.append(meta)
+            except Exception:
+                continue
+    docs.sort(key=lambda item: str(item.get("name") or "").lower())
+    return docs
+
+
+def load_document_pdf_bytes(user_id: str, doc_name: str) -> bytes:
+    payload = download_file_from_supabase(document_source_path(user_id, doc_name), bucket_name=DOCUMENT_AI_BUCKET) if supabase_enabled() else None
+    if payload:
+        return payload
+    local_path = LOCAL_DOCUMENTS_DIR / user_id / f"{doc_name}.pdf"
+    if local_path.exists():
+        return local_path.read_bytes()
+    raise HTTPException(404, "Document not found")
+
+
+def load_document_tree(user_id: str, doc_name: str) -> Optional[List[Dict[str, Any]]]:
+    payload = download_file_from_supabase(document_tree_path(user_id, doc_name), bucket_name=DOCUMENT_AI_BUCKET) if supabase_enabled() else None
+    if payload:
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+    local_path = LOCAL_DOCUMENT_TREES_DIR / user_id / f"{doc_name}_structure.json"
+    if local_path.exists():
+        try:
+            return json.loads(local_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+def extract_pdf_pages_from_bytes(pdf_bytes: bytes) -> Dict[int, str]:
+    pages: Dict[int, str] = {}
+    try:
+        import fitz  # type: ignore
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for index, page in enumerate(doc):
+                pages[index + 1] = page.get_text() or ""
+    except Exception as exc:
+        logger.warning(f"PyMuPDF extraction failed: {exc}")
+    if any(text.strip() for text in pages.values()):
+        return pages
+
+    try:
+        from pypdf import PdfReader  # type: ignore
+        buffer = tempfile.SpooledTemporaryFile()
+        buffer.write(pdf_bytes)
+        buffer.seek(0)
+        pdf_reader = PdfReader(buffer)
+        pages = {index + 1: (page.extract_text() or "") for index, page in enumerate(pdf_reader.pages)}
+        buffer.close()
+    except Exception as exc:
+        logger.warning(f"pypdf extraction failed: {exc}")
+
+    if not any(text.strip() for text in pages.values()):
+        raise HTTPException(400, "PDF contains no extractable text")
+    return pages
+
+
+def build_basic_document_tree(pages: Dict[int, str], chunk_size: int = 10) -> List[Dict[str, Any]]:
+    if not pages:
+        return []
+    total_pages = max(pages.keys())
+    tree: List[Dict[str, Any]] = []
+    node_index = 1
+    for start_page in range(1, total_pages + 1, chunk_size):
+        end_page = min(start_page + chunk_size - 1, total_pages)
+        first_page_text = pages.get(start_page, "")
+        snippet = " ".join(line.strip() for line in first_page_text.splitlines() if line.strip())[:80]
+        title = snippet if len(snippet) >= 6 else f"Pages {start_page}-{end_page}"
+        if len(title) > 60:
+            title = title[:60].rstrip() + "..."
+        tree.append({
+            "id": str(node_index),
+            "title": title,
+            "summary": f"Document section covering pages {start_page} to {end_page}",
+            "start_page": start_page,
+            "end_page": end_page,
+            "depth": 0,
+            "children": [],
+        })
+        node_index += 1
+    return tree
+
+
+def count_document_nodes(tree: List[Dict[str, Any]]) -> int:
+    total = 0
+    for node in tree:
+        total += 1
+        total += count_document_nodes(node.get("children") or [])
+    return total
+
+
+def get_document_pages(user_id: str, doc_name: str) -> Dict[int, str]:
+    cache_key = document_cache_key(user_id, doc_name)
+    cached = document_page_cache.get(cache_key)
+    if cached:
+        return cached
+    pdf_bytes = load_document_pdf_bytes(user_id, doc_name)
+    pages = extract_pdf_pages_from_bytes(pdf_bytes)
+    document_page_cache[cache_key] = pages
+    return pages
+
+
+def get_document_section_text(user_id: str, doc_name: str, start_page: int, end_page: int, max_chars: int = 30000) -> str:
+    pages = get_document_pages(user_id, doc_name)
+    text = ""
+    for page_number in range(start_page, end_page + 1):
+        if page_number in pages:
+            text += f"\n--- Page {page_number} ---\n{pages[page_number]}"
+        if len(text) > max_chars:
+            return text[:max_chars] + "\n[...truncated...]"
+    return text
+
+
+def get_document_full_text(user_id: str, doc_name: str, max_chars: int = 50000) -> str:
+    pages = get_document_pages(user_id, doc_name)
+    parts: List[str] = []
+    for page_number in sorted(pages.keys()):
+        parts.append(f"\n--- Page {page_number} ---\n{pages[page_number]}\n")
+        if sum(len(part) for part in parts) > max_chars:
+            break
+    text = "".join(parts)
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n[...truncated...]"
+    return text
+
+
+def document_ai_completion(context_text: str, prompt: str, system_prompt: Optional[str] = None) -> str:
+    if not genai_client:
+        raise HTTPException(503, "AI service unavailable")
+    if not context_text.strip():
+        raise HTTPException(400, "Document contains no extractable text")
+    full_prompt = (
+        f"{system_prompt or 'You are an expert analyst. Provide clear, practical answers.'}\n\n"
+        f"Document Context:\n{context_text[:35000]}\n\n"
+        f"User Request:\n{prompt}"
+    )
+    try:
+        response = genai_client.models.generate_content(
+            model=DOCUMENT_AI_MODEL,
+            contents=full_prompt,
+        )
+        return (response.text or "").strip()
+    except Exception as exc:
+        logger.error(f"Document AI model call failed: {exc}")
+        raise HTTPException(503, "AI service temporarily unavailable")
+
+
+def create_document_metadata(user_id: str, doc_name: str, tree: List[Dict[str, Any]], pages: Dict[int, str]) -> Dict[str, Any]:
+    return {
+        "name": doc_name,
+        "page_count": len(pages),
+        "node_count": count_document_nodes(tree),
+        "source_path": document_source_path(user_id, doc_name),
+        "tree_path": document_tree_path(user_id, doc_name),
+        "updated_at": utc_now_iso(),
+        "model": DOCUMENT_AI_MODEL,
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -2990,6 +3372,172 @@ async def list_jobs(user: Dict[str, Any] = Depends(require_authenticated_user)):
         return [public_job(j, include_result=False) for j in visible_jobs]
     visible_jobs = [j for j in jobs.values() if not job_owner_id(j) or job_owner_id(j) == user.get("id")]
     return [public_job(j, include_result=False) for j in visible_jobs]
+
+
+async def process_document_background(job_id: str, user_id: str, doc_name: str) -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        document_jobs[job_id]["progress"] = "Extracting pages..."
+        pages = await loop.run_in_executor(None, get_document_pages, user_id, doc_name)
+
+        document_jobs[job_id]["progress"] = "Building structure..."
+        tree = await loop.run_in_executor(None, build_basic_document_tree, pages)
+        await loop.run_in_executor(None, save_document_tree, user_id, doc_name, tree)
+        metadata = create_document_metadata(user_id, doc_name, tree, pages)
+        await loop.run_in_executor(None, save_document_metadata, user_id, doc_name, metadata)
+
+        document_jobs[job_id].update({
+            "status": "completed",
+            "doc_name": doc_name,
+            "progress": f"Complete - {len(tree)} sections",
+            "pages": len(pages),
+        })
+    except HTTPException as exc:
+        document_jobs[job_id].update({
+            "status": "failed",
+            "error": str(exc.detail),
+            "progress": "Processing failed",
+        })
+    except Exception as exc:
+        logger.error(f"Document job {job_id} failed: {exc}", exc_info=True)
+        document_jobs[job_id].update({
+            "status": "failed",
+            "error": "Document processing failed",
+            "progress": "Processing failed",
+        })
+
+
+@app.get("/api/documents")
+async def list_documents(user: Dict[str, Any] = Depends(require_authenticated_user)):
+    user_id = str(user.get("id") or "")
+    metadata_rows = list_document_metadata_for_user(user_id)
+    documents = [{
+        "name": str(meta.get("name") or ""),
+        "pages": int(meta.get("page_count") or 0),
+        "nodes": int(meta.get("node_count") or 0),
+        "updated_at": meta.get("updated_at"),
+    } for meta in metadata_rows if meta.get("name")]
+    return {"documents": documents}
+
+
+@app.post("/api/load")
+async def load_document(req: DocumentLoadRequest, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    user_id = str(user.get("id") or "")
+    doc_name = sanitize_document_name(req.name)
+    tree = load_document_tree(user_id, doc_name)
+    if tree:
+        return {"tree": tree, "name": doc_name}
+
+    pages = get_document_pages(user_id, doc_name)
+    tree = build_basic_document_tree(pages)
+    save_document_tree(user_id, doc_name, tree)
+    save_document_metadata(user_id, doc_name, create_document_metadata(user_id, doc_name, tree, pages))
+    return {"tree": tree, "name": doc_name}
+
+
+@app.post("/api/analyze")
+async def analyze_document_section(req: DocumentAnalyzeRequest, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    user_id = str(user.get("id") or "")
+    start_page = int(req.node.get("start_page") or 1)
+    end_page = int(req.node.get("end_page") or start_page)
+    section_text = get_document_section_text(user_id, sanitize_document_name(req.doc_name), start_page, end_page)
+    answer = document_ai_completion(
+        section_text,
+        (
+            f"Analyze this section titled '{req.node.get('title', 'Untitled')}'. "
+            f"Use clear due-diligence language and cite pages between {start_page} and {end_page}."
+        ),
+        system_prompt="You are an expert private-markets due diligence analyst.",
+    )
+    return {
+        "answer": answer,
+        "section_title": req.node.get("title", ""),
+        "pages": f"{start_page}-{end_page}",
+        "doc_name": sanitize_document_name(req.doc_name),
+    }
+
+
+@app.post("/api/search")
+async def search_document(req: DocumentSearchRequest, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    if not req.doc_name:
+        raise HTTPException(400, "No document selected")
+    user_id = str(user.get("id") or "")
+    doc_name = sanitize_document_name(req.doc_name)
+    full_text = get_document_full_text(user_id, doc_name)
+    answer = document_ai_completion(
+        full_text,
+        f"Question: {req.query}\n\nProvide a concise answer with page citations where possible.",
+        system_prompt="You answer questions strictly from the provided document context.",
+    )
+    confidence = "high"
+    if any(marker in answer.lower() for marker in ["not found", "cannot determine", "does not mention", "no information"]):
+        confidence = "low"
+    return {
+        "answer": answer,
+        "question": req.query,
+        "document": doc_name,
+        "confidence": confidence,
+    }
+
+
+@app.post("/api/gaps")
+async def document_gap_analysis(req: DocumentGapsRequest, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    user_id = str(user.get("id") or "")
+    doc_name = sanitize_document_name(req.doc_name)
+    full_text = get_document_full_text(user_id, doc_name)
+    checklist = req.checklist or DEFAULT_DOCUMENT_CHECKLIST
+    checklist_text = "\n".join(f"{index + 1}. {item}" for index, item in enumerate(checklist))
+    answer = document_ai_completion(
+        full_text,
+        f"Review this document against the checklist below and produce a narrative gap analysis with page citations.\n\n{checklist_text}",
+        system_prompt="You are conducting a private-markets document completeness review.",
+    )
+    return {
+        "answer": answer,
+        "doc_name": doc_name,
+        "stats": {"total_items": len(checklist)},
+    }
+
+
+@app.post("/api/upload")
+async def upload_document(file: UploadFile = File(...), background_tasks: BackgroundTasks = None, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files supported")
+
+    content = await file.read(MAX_DOCUMENT_UPLOAD_SIZE + 1)
+    if len(content) > MAX_DOCUMENT_UPLOAD_SIZE:
+        raise HTTPException(413, "File too large (max 50MB)")
+    if len(content) < 5 or not content.startswith(b"%PDF-"):
+        raise HTTPException(400, "File is not a valid PDF")
+
+    user_id = str(user.get("id") or "")
+    doc_name = sanitize_document_name(file.filename)
+    clear_document_cache(user_id, doc_name)
+    save_document_blob(user_id, doc_name, content)
+
+    job_id = str(uuid.uuid4())
+    document_jobs[job_id] = {
+        "id": job_id,
+        "status": "processing",
+        "doc_name": doc_name,
+        "filename": f"{doc_name}.pdf",
+        "created_at": utc_now_iso(),
+        "progress": "Starting...",
+        "owner_user_id": user_id,
+    }
+    if background_tasks is None:
+        asyncio.create_task(process_document_background(job_id, user_id, doc_name))
+    else:
+        background_tasks.add_task(process_document_background, job_id, user_id, doc_name)
+    return {"job_id": job_id, "status": "processing", "doc_name": doc_name}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_document_job_status(job_id: str, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    job = document_jobs.get(job_id)
+    if not job or job.get("owner_user_id") != user.get("id"):
+        raise HTTPException(404, "Job not found")
+    return {key: value for key, value in job.items() if key != "owner_user_id"}
 
 
 @app.get("/api/status")
