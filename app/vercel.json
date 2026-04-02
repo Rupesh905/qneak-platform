@@ -28,6 +28,10 @@
           "value": "max-age=63072000; includeSubDomains; preload"
         },
         {
+          "key": "Cache-Control",
+          "value": "no-store, no-cache, must-revalidate, max-age=0"
+        },
+        {
           "key": "Content-Security-Policy",
           "value": "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://lh3.googleusercontent.com; connect-src 'self' https://api.qneak.com https://*.supabase.co https://qneak-platform-547919179099.europe-west1.run.app; base-uri 'self'; form-action 'self'"
         }
