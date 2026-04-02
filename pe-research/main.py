@@ -109,11 +109,12 @@ LOCAL_DOCUMENT_ROOT.mkdir(exist_ok=True)
 LOCAL_DOCUMENTS_DIR = LOCAL_DOCUMENT_ROOT / "docs"
 LOCAL_DOCUMENT_TREES_DIR = LOCAL_DOCUMENT_ROOT / "trees"
 LOCAL_DOCUMENT_METADATA_DIR = LOCAL_DOCUMENT_ROOT / "metadata"
+LOCAL_DOCUMENT_JOBS_DIR = LOCAL_DOCUMENT_ROOT / "jobs"
 for _dir in (LOCAL_DOCUMENTS_DIR, LOCAL_DOCUMENT_TREES_DIR, LOCAL_DOCUMENT_METADATA_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
+LOCAL_DOCUMENT_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 jobs: Dict[str, Dict] = {}
-document_jobs: Dict[str, Dict[str, Any]] = {}
 document_page_cache: Dict[str, Dict[int, str]] = {}
 
 
@@ -365,6 +366,25 @@ def download_file_from_supabase(object_name: str, bucket_name: Optional[str] = N
         return None
 
 
+def delete_supabase_object(object_name: str, bucket_name: Optional[str] = None) -> bool:
+    if not (supabase_enabled() and object_name):
+        return False
+    try:
+        bucket = bucket_name or SUPABASE_STORAGE_BUCKET
+        response = req_lib.delete(
+            f"{SUPABASE_URL}/storage/v1/object/{bucket}/{object_name}",
+            headers=supabase_headers(),
+            timeout=30,
+        )
+        if response.status_code in {200, 204, 404}:
+            return True
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        logger.warning(f"Supabase delete failed for {object_name}: {exc}")
+        return False
+
+
 def list_supabase_storage_objects(prefix: str, bucket_name: Optional[str] = None) -> List[Dict[str, Any]]:
     if not supabase_enabled():
         return []
@@ -505,6 +525,7 @@ class DocumentSearchRequest(BaseModel):
     query: str = Field(...)
     doc_name: Optional[str] = None
     tree: List[Any] = Field(default_factory=list)
+    scope: str = Field(default="current")
 
 
 class DocumentGapsRequest(BaseModel):
@@ -554,6 +575,10 @@ def document_metadata_path(user_id: str, doc_name: str) -> str:
     return f"{document_user_prefix(user_id)}/metadata/{doc_name}.json"
 
 
+def document_job_path(user_id: str, job_id: str) -> str:
+    return f"{document_user_prefix(user_id)}/jobs/{job_id}.json"
+
+
 def document_local_file(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -565,6 +590,35 @@ def document_cache_key(user_id: str, doc_name: str) -> str:
 
 def clear_document_cache(user_id: str, doc_name: str) -> None:
     document_page_cache.pop(document_cache_key(user_id, doc_name), None)
+
+
+def save_document_job(user_id: str, job_id: str, payload: Dict[str, Any]) -> str:
+    object_name = document_job_path(user_id, job_id)
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    if supabase_enabled():
+        uploaded = upload_bytes_to_supabase(data, object_name, content_type="application/json", bucket_name=DOCUMENT_AI_BUCKET)
+        if not uploaded:
+            raise HTTPException(503, "Document storage unavailable")
+    local_path = document_local_file(LOCAL_DOCUMENT_JOBS_DIR / user_id / f"{job_id}.json")
+    local_path.write_bytes(data)
+    return object_name
+
+
+def load_document_job(user_id: str, job_id: str) -> Optional[Dict[str, Any]]:
+    object_name = document_job_path(user_id, job_id)
+    payload = download_file_from_supabase(object_name, bucket_name=DOCUMENT_AI_BUCKET) if supabase_enabled() else None
+    if payload:
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+    local_path = LOCAL_DOCUMENT_JOBS_DIR / user_id / f"{job_id}.json"
+    if local_path.exists():
+        try:
+            return json.loads(local_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
 
 
 def save_document_blob(user_id: str, doc_name: str, data: bytes) -> str:
@@ -664,6 +718,22 @@ def load_document_pdf_bytes(user_id: str, doc_name: str) -> bytes:
     if local_path.exists():
         return local_path.read_bytes()
     raise HTTPException(404, "Document not found")
+
+
+def document_exists(user_id: str, doc_name: str) -> bool:
+    if load_document_metadata(user_id, doc_name):
+        return True
+    local_path = LOCAL_DOCUMENTS_DIR / user_id / f"{doc_name}.pdf"
+    return local_path.exists()
+
+
+def ensure_unique_document_name(user_id: str, base_name: str) -> str:
+    candidate = base_name
+    index = 1
+    while document_exists(user_id, candidate):
+        candidate = f"{base_name}_{index}"
+        index += 1
+    return candidate
 
 
 def load_document_tree(user_id: str, doc_name: str) -> Optional[List[Dict[str, Any]]]:
@@ -777,6 +847,61 @@ def get_document_full_text(user_id: str, doc_name: str, max_chars: int = 50000) 
     if len(text) > max_chars:
         return text[:max_chars] + "\n[...truncated...]"
     return text
+
+
+def get_all_documents_text(user_id: str, max_chars: int = 50000) -> tuple[str, List[str]]:
+    metadata_rows = list_document_metadata_for_user(user_id)
+    if not metadata_rows:
+        raise HTTPException(400, "No documents uploaded")
+    parts: List[str] = []
+    included_docs: List[str] = []
+    total_chars = 0
+    for meta in metadata_rows:
+        doc_name = str(meta.get("name") or "").strip()
+        if not doc_name:
+            continue
+        try:
+            doc_text = get_document_full_text(user_id, doc_name, max_chars=max(6000, max_chars // max(len(metadata_rows), 1)))
+        except HTTPException:
+            continue
+        section = f"\n===== DOCUMENT: {doc_name} =====\n{doc_text}\n"
+        if total_chars + len(section) > max_chars and parts:
+            break
+        parts.append(section[: max_chars - total_chars])
+        total_chars += len(parts[-1])
+        included_docs.append(doc_name)
+        if total_chars >= max_chars:
+            break
+    if not parts:
+        raise HTTPException(400, "No documents contain extractable text")
+    return "".join(parts), included_docs
+
+
+def delete_document_assets(user_id: str, doc_name: str) -> bool:
+    if not (load_document_metadata(user_id, doc_name) or load_document_tree(user_id, doc_name) or document_exists(user_id, doc_name)):
+        return False
+    deleted_any = False
+    clear_document_cache(user_id, doc_name)
+
+    supabase_paths = [
+        document_source_path(user_id, doc_name),
+        document_tree_path(user_id, doc_name),
+        document_metadata_path(user_id, doc_name),
+    ]
+    for object_name in supabase_paths:
+        if supabase_enabled() and delete_supabase_object(object_name, bucket_name=DOCUMENT_AI_BUCKET):
+            deleted_any = True
+
+    local_paths = [
+        LOCAL_DOCUMENTS_DIR / user_id / f"{doc_name}.pdf",
+        LOCAL_DOCUMENT_TREES_DIR / user_id / f"{doc_name}_structure.json",
+        LOCAL_DOCUMENT_METADATA_DIR / user_id / f"{doc_name}.json",
+    ]
+    for path in local_paths:
+        if path.exists():
+            path.unlink()
+            deleted_any = True
+    return deleted_any
 
 
 def document_ai_completion(context_text: str, prompt: str, system_prompt: Optional[str] = None) -> str:
@@ -3375,36 +3500,44 @@ async def list_jobs(user: Dict[str, Any] = Depends(require_authenticated_user)):
 
 
 async def process_document_background(job_id: str, user_id: str, doc_name: str) -> None:
+    job = load_document_job(user_id, job_id)
+    if not job:
+        return
     try:
         loop = asyncio.get_event_loop()
-        document_jobs[job_id]["progress"] = "Extracting pages..."
+        job["progress"] = "Extracting pages..."
+        save_document_job(user_id, job_id, job)
         pages = await loop.run_in_executor(None, get_document_pages, user_id, doc_name)
 
-        document_jobs[job_id]["progress"] = "Building structure..."
+        job["progress"] = "Building structure..."
+        save_document_job(user_id, job_id, job)
         tree = await loop.run_in_executor(None, build_basic_document_tree, pages)
         await loop.run_in_executor(None, save_document_tree, user_id, doc_name, tree)
         metadata = create_document_metadata(user_id, doc_name, tree, pages)
         await loop.run_in_executor(None, save_document_metadata, user_id, doc_name, metadata)
 
-        document_jobs[job_id].update({
+        job.update({
             "status": "completed",
             "doc_name": doc_name,
             "progress": f"Complete - {len(tree)} sections",
             "pages": len(pages),
         })
+        save_document_job(user_id, job_id, job)
     except HTTPException as exc:
-        document_jobs[job_id].update({
+        job.update({
             "status": "failed",
             "error": str(exc.detail),
             "progress": "Processing failed",
         })
+        save_document_job(user_id, job_id, job)
     except Exception as exc:
         logger.error(f"Document job {job_id} failed: {exc}", exc_info=True)
-        document_jobs[job_id].update({
+        job.update({
             "status": "failed",
             "error": "Document processing failed",
             "progress": "Processing failed",
         })
+        save_document_job(user_id, job_id, job)
 
 
 @app.get("/api/documents")
@@ -3459,11 +3592,18 @@ async def analyze_document_section(req: DocumentAnalyzeRequest, user: Dict[str, 
 
 @app.post("/api/search")
 async def search_document(req: DocumentSearchRequest, user: Dict[str, Any] = Depends(require_authenticated_user)):
-    if not req.doc_name:
-        raise HTTPException(400, "No document selected")
     user_id = str(user.get("id") or "")
-    doc_name = sanitize_document_name(req.doc_name)
-    full_text = get_document_full_text(user_id, doc_name)
+    scope = (req.scope or "current").lower()
+    if scope == "all":
+        full_text, included_docs = get_all_documents_text(user_id)
+        context_label = "all-documents"
+    else:
+        if not req.doc_name:
+            raise HTTPException(400, "No document selected")
+        doc_name = sanitize_document_name(req.doc_name)
+        full_text = get_document_full_text(user_id, doc_name)
+        included_docs = [doc_name]
+        context_label = doc_name
     answer = document_ai_completion(
         full_text,
         f"Question: {req.query}\n\nProvide a concise answer with page citations where possible.",
@@ -3475,7 +3615,9 @@ async def search_document(req: DocumentSearchRequest, user: Dict[str, Any] = Dep
     return {
         "answer": answer,
         "question": req.query,
-        "document": doc_name,
+        "document": context_label,
+        "documents": included_docs,
+        "scope": scope,
         "confidence": confidence,
     }
 
@@ -3511,12 +3653,12 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
         raise HTTPException(400, "File is not a valid PDF")
 
     user_id = str(user.get("id") or "")
-    doc_name = sanitize_document_name(file.filename)
+    doc_name = ensure_unique_document_name(user_id, sanitize_document_name(file.filename))
     clear_document_cache(user_id, doc_name)
     save_document_blob(user_id, doc_name, content)
 
     job_id = str(uuid.uuid4())
-    document_jobs[job_id] = {
+    job_payload = {
         "id": job_id,
         "status": "processing",
         "doc_name": doc_name,
@@ -3525,6 +3667,7 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
         "progress": "Starting...",
         "owner_user_id": user_id,
     }
+    save_document_job(user_id, job_id, job_payload)
     if background_tasks is None:
         asyncio.create_task(process_document_background(job_id, user_id, doc_name))
     else:
@@ -3532,9 +3675,19 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
     return {"job_id": job_id, "status": "processing", "doc_name": doc_name}
 
 
+@app.delete("/api/documents/{doc_name}")
+async def delete_document(doc_name: str, user: Dict[str, Any] = Depends(require_authenticated_user)):
+    user_id = str(user.get("id") or "")
+    safe_name = sanitize_document_name(doc_name)
+    if not delete_document_assets(user_id, safe_name):
+        raise HTTPException(404, "Document not found")
+    return {"deleted": True, "doc_name": safe_name}
+
+
 @app.get("/api/jobs/{job_id}")
 async def get_document_job_status(job_id: str, user: Dict[str, Any] = Depends(require_authenticated_user)):
-    job = document_jobs.get(job_id)
+    user_id = str(user.get("id") or "")
+    job = load_document_job(user_id, job_id)
     if not job or job.get("owner_user_id") != user.get("id"):
         raise HTTPException(404, "Job not found")
     return {key: value for key, value in job.items() if key != "owner_user_id"}
