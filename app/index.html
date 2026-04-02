@@ -412,6 +412,7 @@ const SESSION_INACTIVITY_MS = 6 * 60 * 60 * 1000;
 let sessionExpiryTimer = null;
 let currentSessionUserEmail = '';
 let sessionActivityListenersBound = false;
+let appBootstrapped = false;
 
 function clearSessionExpiryState() {
   localStorage.removeItem(SESSION_LAST_ACTIVE_AT_KEY);
@@ -546,6 +547,8 @@ function clearSessionHash() {
 }
 
 function showAppForUser(userEmail) {
+  if (appBootstrapped) return;
+  appBootstrapped = true;
   const resolvedEmail = userEmail || 'user@qneak.com';
   currentSessionUserEmail = resolvedEmail;
   bindSessionActivityListeners();
@@ -558,6 +561,43 @@ function showAppForUser(userEmail) {
   peStatus();
   peLoadJobs();
   docLoadList();
+}
+
+function resetAppBootstrap() {
+  appBootstrapped = false;
+}
+
+async function tryResolveSession(sessionFromHash = null) {
+  let resolvedSession = null;
+
+  if (sessionFromHash) {
+    const { data, error: setSessionError } = await supabaseClient.auth.setSession(sessionFromHash);
+    clearSessionHash();
+    if (setSessionError) {
+      console.error('Session handoff failed:', setSessionError);
+    } else if (data?.session) {
+      resolvedSession = data.session;
+    }
+  }
+
+  if (!resolvedSession) {
+    const { data: { session }, error } = await supabaseClient.auth.getSession();
+    if (error) {
+      throw error;
+    }
+    resolvedSession = session || null;
+  }
+
+  if (!resolvedSession) {
+    const { data, error } = await supabaseClient.auth.refreshSession();
+    if (error) {
+      console.error('Session refresh failed:', error);
+    } else if (data?.session) {
+      resolvedSession = data.session;
+    }
+  }
+
+  return resolvedSession;
 }
 
 // ==========================================
@@ -581,28 +621,8 @@ window.addEventListener('load', async function() {
     }
 
     const sessionFromHash = readSessionFromHash();
-    if (sessionFromHash) {
-      const { error: setSessionError } = await supabaseClient.auth.setSession(sessionFromHash);
-      clearSessionHash();
-      if (setSessionError) {
-        console.error('Session handoff failed:', setSessionError);
-      }
-    }
+    const session = await tryResolveSession(sessionFromHash);
 
-    const { data: { session }, error } = await supabaseClient.auth.getSession();
-    
-    if (error) {
-      console.error('Session error:', error);
-      if (localDevEmail) {
-        if (await allowSession(localDevEmail)) {
-          showAppForUser(localDevEmail);
-        }
-        return;
-      }
-      window.location.href = LANDING_URL;
-      return;
-    }
-    
     if (!session) {
       if (localDevEmail) {
         if (await allowSession(localDevEmail)) {
@@ -610,8 +630,6 @@ window.addEventListener('load', async function() {
         }
         return;
       }
-
-      // Not logged in - redirect to landing page
       console.log('No session - redirecting to login');
       window.location.href = LANDING_URL;
       return;
@@ -636,6 +654,22 @@ window.addEventListener('load', async function() {
     window.location.href = LANDING_URL;
   }
 });
+
+if (supabaseClient) {
+  supabaseClient.auth.onAuthStateChange(async (event, session) => {
+    if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session?.user?.email) {
+      if (!(await allowSession(session.user.email))) {
+        return;
+      }
+      showAppForUser(session.user.email);
+      return;
+    }
+
+    if (event === 'SIGNED_OUT') {
+      resetAppBootstrap();
+    }
+  });
+}
 
 // ==========================================
 // LOGOUT FUNCTION (ADDED)
