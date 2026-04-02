@@ -12,7 +12,7 @@ import uuid
 import re
 import mimetypes
 import requests as req_lib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 
 from google import genai as google_genai
@@ -84,6 +84,7 @@ TINYFISH_TIMEOUT     = 180
 MAX_STREAM_EVENTS    = 150
 MAX_STEPS_PER_EXTR   = 600
 MAX_AGENT_ITERATIONS = 60  # Increased: 14 phases with multiple searches each
+STALE_JOB_MINUTES    = int(os.getenv("STALE_JOB_MINUTES", "90"))
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(title="PE Research Engine", version="8.0.0", docs_url=None, redoc_url=None)
@@ -99,6 +100,10 @@ os.makedirs("reports", exist_ok=True)
 os.makedirs("static",  exist_ok=True)
 
 jobs: Dict[str, Dict] = {}
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def supabase_enabled() -> bool:
@@ -143,6 +148,7 @@ def public_result(result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cleaned = dict(result or {})
     cleaned.pop("_owner_user_id", None)
     cleaned.pop("_owner_email", None)
+    cleaned.pop("_job_updated_at", None)
     return cleaned
 
 
@@ -159,6 +165,8 @@ def public_job(job: Dict[str, Any], include_result: bool = True) -> Dict[str, An
 
 def serialize_job(job: Dict[str, Any]) -> Dict[str, Any]:
     result = with_owner_meta(job.get("result"), job)
+    result["_job_updated_at"] = utc_now_iso()
+    job["result"] = result
     return {
         "id": job["job_id"],
         "company_name": job.get("company"),
@@ -192,6 +200,42 @@ def hydrate_job(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def parse_job_time(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def job_last_updated_at(job: Dict[str, Any]) -> Optional[datetime]:
+    result = job.get("result") or {}
+    return parse_job_time(result.get("_job_updated_at")) or parse_job_time(job.get("created"))
+
+
+def mark_job_stale_if_needed(job: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not job:
+        return job
+    if job.get("status") not in {"queued", "running"}:
+        return job
+    last_updated_at = job_last_updated_at(job)
+    if not last_updated_at:
+        return job
+    if datetime.now(timezone.utc) - last_updated_at < timedelta(minutes=STALE_JOB_MINUTES):
+        return job
+    job.update({
+        "status": "failed",
+        "message": "Research stopped before finishing. Please restart research.",
+        "error": "Job became stale before completion",
+    })
+    persist_job(job)
+    return job
+
+
 def persist_job(job: Dict[str, Any]) -> None:
     if not supabase_enabled():
         return
@@ -221,7 +265,7 @@ def fetch_job_from_supabase(job_id: str) -> Optional[Dict[str, Any]]:
         response.raise_for_status()
         rows = response.json()
         if rows:
-            return hydrate_job(rows[0])
+            return mark_job_stale_if_needed(hydrate_job(rows[0]))
     except Exception as exc:
         logger.warning(f"Supabase job fetch failed for {job_id}: {exc}")
     return None
@@ -239,7 +283,7 @@ def list_jobs_from_supabase() -> Optional[List[Dict[str, Any]]]:
             timeout=20,
         )
         response.raise_for_status()
-        return [hydrate_job(row) for row in response.json()]
+        return [mark_job_stale_if_needed(hydrate_job(row)) for row in response.json()]
     except Exception as exc:
         logger.warning(f"Supabase job list failed: {exc}")
         return None
@@ -2694,7 +2738,7 @@ class ResearchOrchestrator:
             unique_sources = filter_relevant_sources(unique_sources, company_name, website_url)
 
             # 3. Synthesis
-            update(80, f"Synthesising {len(unique_sources)} sources with Gemini 2.5 Pro...")
+            update(80, f"Synthesising {len(unique_sources)} sources with Gemini...")
             synthesis = await loop.run_in_executor(
                 None,
                 self.synthesiser.synthesise,

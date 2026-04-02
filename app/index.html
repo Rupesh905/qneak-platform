@@ -729,7 +729,7 @@ async function peStart(){
 
 function pePoll(id,name){
   peRenderJob(id,{status:'queued',progress:0,message:'Queued...',company:name});
-  const fn=async()=>{try{const r=await authFetch(`${PE_API}/api/research/${encodeURIComponent(id)}`);const d=await r.json();peRenderJob(id,d);if(PE_COMPLETE_STATUSES.has(d.status)||d.status==='failed'){clearInterval(pePollers[id]);delete pePollers[id];if(PE_COMPLETE_STATUSES.has(d.status))peAddReport(d);peLoadJobs()}}catch{}};
+  const fn=async()=>{try{const r=await authFetch(`${PE_API}/api/research/${encodeURIComponent(id)}`);const d=await r.json();peRenderJob(id,d);if(PE_COMPLETE_STATUSES.has(d.status)||d.status==='failed'){clearInterval(pePollers[id]);delete pePollers[id];if(PE_COMPLETE_STATUSES.has(d.status))peAddReport(d);peRemoveJob(id);peLoadJobs()}}catch{}};
   fn();pePollers[id]=setInterval(fn,4000);
 }
 
@@ -737,6 +737,11 @@ function peRenderJob(id,d){
   const list=document.getElementById('peJobs');let el=document.getElementById(`pj-${id}`);
   if(!el){el=document.createElement('div');el.id=`pj-${id}`;el.className='job-row';list.prepend(el)}
   el.innerHTML=`<div class="job-top"><div class="job-name">${esc(d.company||'')}</div><div class="job-stage">${esc(d.message||d.status)} <span class="pct">${d.progress||0}%</span></div></div><div class="job-bar"><div class="job-fill" style="width:${d.progress||0}%"></div></div><div class="job-meta"><div class="d"></div>${d.status}</div>`;
+}
+
+function peRemoveJob(id){
+  const row=document.getElementById(`pj-${id}`);
+  if(row)row.remove();
 }
 
 function formatReportTimestamp(raw){
@@ -810,16 +815,29 @@ async function peDownload(id,name){
 }
 
 async function peLoadJobs(){
-  try{const r=await authFetch(`${PE_API}/api/jobs`);const jobs=await r.json();let a=0,c=0;
+  try{const r=await authFetch(`${PE_API}/api/jobs`);const jobs=await r.json();let a=0,c=0;const activeIds=new Set();
   jobs.forEach(j=>{
     if(j.status==='running'||j.status==='queued'){
+      const jobId=String(j.job_id||j.id||'');
+      if(jobId)activeIds.add(jobId);
       a++;
-      if(!pePollers[j.job_id])pePoll(j.job_id,j.company);
+      peRenderJob(jobId,j);
+      if(jobId && !pePollers[jobId])pePoll(jobId,j.company);
     }
     if(PE_COMPLETE_STATUSES.has(j.status)){
       c++;
       peAddReport(j);
     }
+  });
+  Object.keys(pePollers).forEach(id=>{
+    if(!activeIds.has(String(id))){
+      clearInterval(pePollers[id]);
+      delete pePollers[id];
+    }
+  });
+  document.querySelectorAll('#peJobs .job-row').forEach(row=>{
+    const jobId=row.id.replace(/^pj-/,'');
+    if(!activeIds.has(jobId))row.remove();
   });
   document.getElementById('peActive').textContent=a;document.getElementById('peCompleted').textContent=c}catch{}
 }
